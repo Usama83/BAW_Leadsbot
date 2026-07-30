@@ -30,7 +30,11 @@ app.use(
 );
 
 app.get("/", (_req, res) => {
-  res.json({ ok: true, service: "baw-leadsbot", phase: 0 });
+  res.json({ ok: true, service: "baw-leadsbot", phase: 0, dashboard: "/dashboard" });
+});
+
+app.get("/dashboard", (_req, res) => {
+  res.sendFile(path.join(__dirname, "public", "dashboard.html"));
 });
 
 // Some webhook providers probe with GET before accepting a URL.

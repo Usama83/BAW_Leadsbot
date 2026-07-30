@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BAW Leads — Rasayel Attribution</title>
+<style>
+  :root {
+    color-scheme: light;
+    --page:           #f9f9f7;
+    --surface-1:      #fcfcfb;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --muted:          #898781;
+    --grid:           #e1e0d9;
+    --border:         rgba(11,11,11,0.10);
+    --accent:         #2a78d6;
+    --good:           #0ca30c;
+    --good-text:      #006300;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --page:           #0d0d0d;
+      --surface-1:      #1a1a19;
+      --text-primary:   #ffffff;
+      --text-secondary: #c3c2b7;
+      --muted:          #898781;
+      --grid:           #2c2c2a;
+      --border:         rgba(255,255,255,0.10);
+      --accent:         #3987e5;
+      --good:           #0ca30c;
+      --good-text:      #0ca30c;
+    }
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--page);
+    color: var(--text-primary);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    padding: 24px;
+    max-width: 1100px;
+    margin: 0 auto;
+  }
+  header { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
+  h1 { font-size: 20px; font-weight: 650; }
+  .sub { color: var(--text-secondary); font-size: 13px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 24px; }
+  .tile {
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .tile .label { font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; }
+  .tile .value { font-size: 28px; font-weight: 650; line-height: 1.1; }
+  .tile .hint  { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  section { margin-bottom: 28px; }
+  h2 { font-size: 14px; font-weight: 650; margin-bottom: 10px; color: var(--text-primary); }
+  .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th {
+    text-align: left; font-weight: 600; color: var(--muted);
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
+    padding: 10px 14px; border-bottom: 1px solid var(--grid);
+    white-space: nowrap;
+  }
+  td { padding: 10px 14px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  td.num { font-variant-numeric: tabular-nums; }
+  .chip {
+    display: inline-block; padding: 2px 8px; border-radius: 999px;
+    font-size: 11px; font-weight: 600; border: 1px solid var(--border);
+    color: var(--text-secondary); white-space: nowrap;
+  }
+  .chip.ad    { color: var(--good-text); border-color: var(--good); }
+  .chip.in    { color: var(--accent); border-color: var(--accent); }
+  .empty { padding: 28px; text-align: center; color: var(--muted); font-size: 13px; }
+  .msg { color: var(--text-secondary); max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  footer { color: var(--muted); font-size: 11px; margin-top: 8px; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>BAW Leads — Rasayel Attribution</h1>
+    <div class="sub">Live view of captured WhatsApp activity · refreshes every 10s</div>
+  </div>
+  <div class="sub" id="updated"></div>
+</header>
+
+<div class="tiles">
+  <div class="tile"><div class="label">Customers</div><div class="value" id="t-customers">–</div><div class="hint">unique phone numbers</div></div>
+  <div class="tile"><div class="label">From ads</div><div class="value" id="t-ads">–</div><div class="hint">leads with ad referral data</div></div>
+  <div class="tile"><div class="label">Inbound messages</div><div class="value" id="t-in">–</div><div class="hint">sent by customers</div></div>
+  <div class="tile"><div class="label">Outbound messages</div><div class="value" id="t-out">–</div><div class="hint">sent by your team</div></div>
+  <div class="tile"><div class="label">Webhook events</div><div class="value" id="t-events">–</div><div class="hint">total received</div></div>
+</div>
+
+<section>
+  <h2>Leads</h2>
+  <div class="card">
+    <table>
+      <thead><tr>
+        <th>Customer</th><th>Phone</th><th>Source</th><th>Messages</th><th>First seen</th><th>Last activity</th>
+      </tr></thead>
+      <tbody id="leads"></tbody>
+    </table>
+    <div class="empty" id="leads-empty" hidden>No leads captured yet — send a WhatsApp message to the business number.</div>
+  </div>
+</section>
+
+<section>
+  <h2>Event feed</h2>
+  <div class="card">
+    <table>
+      <thead><tr>
+        <th>Time</th><th>Event</th><th>Direction</th><th>Customer</th><th>Message</th>
+      </tr></thead>
+      <tbody id="events"></tbody>
+    </table>
+    <div class="empty" id="events-empty" hidden>No webhook events received yet.</div>
+  </div>
+</section>
+
+<footer>BAW Leadsbot · Phase 0 dashboard · data from <code>/payloads</code></footer>
+
+<script>
+const AD_KEY_RE = /referral|ctwa|ad_?id|adid|source_?url|headline|ad_?title|campaign/i;
+
+// Deep-search helpers — the payload shape is still being confirmed, so the
+// dashboard finds what it needs wherever it lives in the event tree.
+function* walk(node) {
+  if (node && typeof node === "object") {
+    yield node;
+    for (const v of Object.values(node)) yield* walk(v);
+  }
+}
+function findChannelUser(root) {
+  for (const n of walk(root)) {
+    if (n.__typename === "ChannelUser") return n;
+  }
+  return null;
+}
+function findAdInfo(root) {
+  const hits = {};
+  for (const n of walk(root)) {
+    for (const [k, v] of Object.entries(n)) {
+      if (AD_KEY_RE.test(k) && v != null && typeof v !== "object" && v !== "") hits[k] = v;
+      if (k === "referral" && v && typeof v === "object") {
+        for (const [rk, rv] of Object.entries(v)) {
+          if (rv != null && typeof rv !== "object") hits["referral." + rk] = rv;
+        }
+      }
+    }
+  }
+  return Object.keys(hits).length ? hits : null;
+}
+function channelUserName(cu) {
+  if (!cu) return null;
+  return cu.displayName || [cu.firstName, cu.lastName].filter(Boolean).join(" ") || cu.name || null;
+}
+function channelUserPhone(cu) {
+  if (!cu || !Array.isArray(cu.identifiers)) return null;
+  const id = cu.identifiers.find(i => i && i.category === "PHONE") || cu.identifiers[0];
+  return id ? id.sourceId : null;
+}
+function fmt(ts) {
+  if (!ts) return "–";
+  const d = new Date(ts);
+  return isNaN(d) ? "–" : d.toLocaleString();
+}
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+async function refresh() {
+  let events;
+  try {
+    events = await (await fetch("/payloads")).json();
+  } catch {
+    return;
+  }
+
+  const parsed = events.map(ev => {
+    const b = ev.body || {};
+    const data = b.data || {};
+    const cu = findChannelUser(b);
+    const msgBody = typeof data.body === "string" ? data.body
+                  : (typeof (data.message && data.message.body) === "string" ? data.message.body : null);
+    const direction = data.direction || (data.message && data.message.direction) || null;
+    return {
+      at: ev.received_at,
+      type: b.event || "(unknown)",
+      direction,
+      name: channelUserName(cu),
+      phone: channelUserPhone(cu),
+      message: msgBody,
+      ad: findAdInfo(b),
+    };
+  });
+
+  // Leads: group by phone
+  const leads = new Map();
+  for (const p of parsed) {
+    if (!p.phone) continue;
+    const lead = leads.get(p.phone) || {
+      phone: p.phone, name: null, count: 0, first: p.at, last: p.at, ad: null,
+    };
+    if (p.name) lead.name = p.name;
+    lead.count += 1;
+    if (p.at < lead.first) lead.first = p.at;
+    if (p.at > lead.last) lead.last = p.at;
+    if (p.ad) lead.ad = { ...(lead.ad || {}), ...p.ad };
+    leads.set(p.phone, lead);
+  }
+
+  document.getElementById("t-events").textContent = parsed.length;
+  document.getElementById("t-customers").textContent = leads.size;
+  document.getElementById("t-ads").textContent = [...leads.values()].filter(l => l.ad).length;
+  document.getElementById("t-in").textContent  = parsed.filter(p => p.direction === "INBOUND").length;
+  document.getElementById("t-out").textContent = parsed.filter(p => p.direction === "OUTBOUND").length;
+
+  const leadsBody = document.getElementById("leads");
+  leadsBody.innerHTML = [...leads.values()]
+    .sort((a, b) => (a.last < b.last ? 1 : -1))
+    .map(l => {
+      const src = l.ad
+        ? `<span class="chip ad">Ad</span> <span class="sub">${esc(l.ad["referral.headline"] || l.ad.headline || l.ad["referral.sourceUrl"] || Object.values(l.ad)[0])}</span>`
+        : `<span class="chip">Direct</span>`;
+      return `<tr>
+        <td>${esc(l.name || "(no name)")}</td>
+        <td class="num">${esc(l.phone)}</td>
+        <td>${src}</td>
+        <td class="num">${l.count}</td>
+        <td class="num">${fmt(l.first)}</td>
+        <td class="num">${fmt(l.last)}</td>
+      </tr>`;
+    }).join("");
+  document.getElementById("leads-empty").hidden = leads.size > 0;
+
+  const evBody = document.getElementById("events");
+  evBody.innerHTML = parsed
+    .slice()
+    .reverse()
+    .slice(0, 50)
+    .map(p => `<tr>
+      <td class="num">${fmt(p.at)}</td>
+      <td>${esc(p.type)}</td>
+      <td>${p.direction ? `<span class="chip ${p.direction === "INBOUND" ? "in" : ""}">${esc(p.direction)}</span>` : "–"}</td>
+      <td>${esc(p.name || "–")}</td>
+      <td class="msg">${esc(p.message || "–")}</td>
+    </tr>`).join("");
+  document.getElementById("events-empty").hidden = parsed.length > 0;
+
+  document.getElementById("updated").textContent = "Updated " + new Date().toLocaleTimeString();
+}
+
+refresh();
+setInterval(refresh, 10000);
+</script>
+</body>
+</html>
