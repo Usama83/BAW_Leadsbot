@@ -1,0 +1,17 @@
+{
+  "name": "baw-leadsbot",
+  "version": "0.1.0",
+  "description": "Rasayel ad attribution bot for Brass & Wood — Phase 0: raw webhook capture",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "register-webhook": "node scripts/register-webhook.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
