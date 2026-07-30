@@ -38,9 +38,13 @@ app.get("/webhooks/rasayel", (_req, res) => {
   res.status(200).send("OK");
 });
 
-app.post("/webhooks/rasayel", (req, res) => {
+// Capture POSTs on any path — webhook URLs are often configured without the
+// intended /webhooks/rasayel suffix, and losing those deliveries to a 404
+// defeats the purpose of Phase 0.
+app.post(/.*/, (req, res) => {
   const event = {
     received_at: new Date().toISOString(),
+    path: req.path,
     headers: req.headers,
     body: req.body,
     raw_body: req.rawBody,
