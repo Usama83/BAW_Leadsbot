@@ -137,6 +137,9 @@ function* walk(node) {
   }
 }
 function findChannelUser(root) {
+  // Live webhooks carry a ChannelUser participant; history-sync events carry
+  // the contact record directly under data.contact.
+  if (root && root.data && root.data.contact) return root.data.contact;
   for (const n of walk(root)) {
     if (n.__typename === "ChannelUser") return n;
   }
@@ -161,9 +164,25 @@ function channelUserName(cu) {
   return cu.displayName || [cu.firstName, cu.lastName].filter(Boolean).join(" ") || cu.name || null;
 }
 function channelUserPhone(cu) {
-  if (!cu || !Array.isArray(cu.identifiers)) return null;
-  const id = cu.identifiers.find(i => i && i.category === "PHONE") || cu.identifiers[0];
-  return id ? id.sourceId : null;
+  if (!cu) return null;
+  if (Array.isArray(cu.identifiers)) {
+    const id = cu.identifiers.find(i => i && i.category === "PHONE") || cu.identifiers[0];
+    if (id && id.sourceId) return id.sourceId;
+  }
+  return cu.phone || cu.phoneNumber || null;
+}
+function isAdLead(hits) {
+  if (!hits) return false;
+  const typeKey = Object.keys(hits).find(k => /referral.*(type|source_?type)/i.test(k) || /^referralSourceType$/i.test(k));
+  if (typeKey) return String(hits[typeKey]).toLowerCase() === "ad";
+  return Object.keys(hits).some(k => /ctwa|ad_?id|headline/i.test(k));
+}
+function adLabel(hits) {
+  const pick = (re) => {
+    const k = Object.keys(hits).find(x => re.test(x));
+    return k ? hits[k] : null;
+  };
+  return pick(/headline|ad_?title/i) || pick(/source_?url|sourceUrl/i) || pick(/source_?id|sourceId/i) || Object.values(hits)[0];
 }
 function fmt(ts) {
   if (!ts) return "–";
@@ -217,7 +236,7 @@ async function refresh() {
 
   document.getElementById("t-events").textContent = parsed.length;
   document.getElementById("t-customers").textContent = leads.size;
-  document.getElementById("t-ads").textContent = [...leads.values()].filter(l => l.ad).length;
+  document.getElementById("t-ads").textContent = [...leads.values()].filter(l => isAdLead(l.ad)).length;
   document.getElementById("t-in").textContent  = parsed.filter(p => p.direction === "INBOUND").length;
   document.getElementById("t-out").textContent = parsed.filter(p => p.direction === "OUTBOUND").length;
 
@@ -225,8 +244,8 @@ async function refresh() {
   leadsBody.innerHTML = [...leads.values()]
     .sort((a, b) => (a.last < b.last ? 1 : -1))
     .map(l => {
-      const src = l.ad
-        ? `<span class="chip ad">Ad</span> <span class="sub">${esc(l.ad["referral.headline"] || l.ad.headline || l.ad["referral.sourceUrl"] || Object.values(l.ad)[0])}</span>`
+      const src = isAdLead(l.ad)
+        ? `<span class="chip ad">Ad</span> <span class="sub">${esc(adLabel(l.ad))}</span>`
         : `<span class="chip">Direct</span>`;
       return `<tr>
         <td>${esc(l.name || "(no name)")}</td>

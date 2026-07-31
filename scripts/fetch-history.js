@@ -1,13 +1,14 @@
-// Pulls conversation history from the Rasayel API and merges it into the
-// bot's data so the dashboard shows past leads, not only live webhooks.
+// Pulls contacts (channel users) from the Rasayel API — including their ad
+// referral fields — and merges them into the bot's data so the dashboard
+// shows historical leads, not only live webhooks.
 //
 // Reads RASAYEL_API_TOKEN from .env (see .env.example). Optional env vars:
 //   HISTORY_FROM=2026-07-01  HISTORY_TO=2026-07-31   (defaults: July 2026)
 //
-// The exact Rasayel GraphQL schema hasn't been confirmed yet, so this script
-// works in two stages: it attempts a best-guess conversations query modeled on
-// the webhook payload shape; if the API rejects it, it saves a compact schema
-// summary to data/rasayel-schema-summary.json for adapting the query.
+// The script adapts itself to Rasayel's schema at runtime: it introspects the
+// contacts query and its node type, selects every scalar field that exists
+// (so referral source id/url/type are picked up under whatever names Rasayel
+// uses), and paginates through all contacts.
 
 import fs from "fs";
 import path from "path";
@@ -55,6 +56,23 @@ async function gql(query, variables = {}) {
   return json.data;
 }
 
+function unwrap(t) {
+  while (t && (t.kind === "NON_NULL" || t.kind === "LIST")) t = t.ofType;
+  return t;
+}
+
+async function typeFields(name) {
+  const d = await gql(
+    `query($n: String!) { __type(name: $n) { name kind fields {
+       name
+       args { name }
+       type { kind name ofType { kind name ofType { kind name ofType { kind name } } } }
+     } } }`,
+    { n: name }
+  );
+  return d.__type;
+}
+
 function toDate(v) {
   if (v == null) return null;
   if (typeof v === "number") return new Date(v < 1e12 ? v * 1000 : v);
@@ -62,113 +80,119 @@ function toDate(v) {
   return isNaN(d) ? null : d;
 }
 
-function appendEvent(conversation, createdAt) {
+function appendEvent(contact, when) {
   const event = {
-    received_at: createdAt.toISOString(),
+    received_at: (when || new Date()).toISOString(),
     path: "/history-sync",
     headers: { "x-source": "fetch-history" },
-    body: { event: "history.sync", data: { conversation } },
+    body: { event: "history.sync", data: { contact } },
   };
   fs.appendFileSync(PAYLOAD_LOG, JSON.stringify(event) + "\n");
 }
 
-async function saveSchemaSummary() {
-  const data = await gql(`{
-    __schema {
-      queryType {
-        fields {
-          name
-          args { name type { kind name ofType { kind name } } }
-          type { kind name ofType { kind name } }
-        }
-      }
-    }
-  }`);
-  const interesting = data.__schema.queryType.fields.filter((f) =>
-    /conversation|contact|message|channel|lead/i.test(f.name)
-  );
-  const typeNames = new Set();
-  for (const f of interesting) {
-    let t = f.type;
-    while (t) { if (t.name) typeNames.add(t.name); t = t.ofType; }
-  }
-  const typeDetails = {};
-  for (const name of typeNames) {
-    try {
-      const td = await gql(
-        `query($n: String!) { __type(name: $n) { name fields { name type { kind name ofType { kind name ofType { kind name } } } } } }`,
-        { n: name }
-      );
-      if (td.__type) typeDetails[name] = td.__type.fields?.map((f) => f.name);
-    } catch { /* skip */ }
-  }
-  const summary = { queries: interesting, types: typeDetails };
-  const out = path.join(DATA_DIR, "rasayel-schema-summary.json");
-  fs.writeFileSync(out, JSON.stringify(summary, null, 2));
-  console.log(`\nSchema summary saved to: ${out}`);
-  console.log("Open that file, copy its content, and paste it in the Claude chat");
-  console.log("so the query can be adapted to Rasayel's exact API.");
-}
-
 async function main() {
-  console.log(`Fetching Rasayel history ${FROM.toISOString().slice(0, 10)} .. ${TO.toISOString().slice(0, 10)}`);
+  console.log(`Fetching Rasayel contacts ${FROM.toISOString().slice(0, 10)} .. ${TO.toISOString().slice(0, 10)}`);
   console.log("Checking API access...");
   await gql("{ __typename }");
   console.log("API reachable, token accepted.");
 
-  const QUERY = `
-    query($after: String) {
-      conversations(first: 50, after: $after) {
-        pageInfo { hasNextPage endCursor }
-        nodes {
-          id
-          createdAt
-          channelType
-          participants {
-            user {
-              __typename
-              ... on ChannelUser {
-                name
-                firstName
-                lastName
-                displayName
-                identifiers { sourceId category }
-              }
-            }
-          }
-        }
-      }
-    }`;
+  // 1. Find the contacts query on the Query type.
+  const q = await typeFields("Query");
+  const candidates = q.fields.filter((f) => /^(channelUsers|contacts|channel_users)$/i.test(f.name));
+  const target = candidates[0] || q.fields.find((f) => /channelUser|contact/i.test(f.name));
+  if (!target) {
+    console.error("Could not find a contacts query. Available queries:");
+    console.error(q.fields.map((f) => f.name).join(", "));
+    process.exit(1);
+  }
+  console.log(`Using query: ${target.name}`);
 
+  // 2. Inspect the returned connection type to find nodes/edges and the node type.
+  const connName = unwrap(target.type)?.name;
+  const conn = await typeFields(connName);
+  const hasNodes = conn.fields.some((f) => f.name === "nodes");
+  const hasEdges = conn.fields.some((f) => f.name === "edges");
+  const hasPageInfo = conn.fields.some((f) => f.name === "pageInfo");
+  let nodeTypeName;
+  if (hasNodes) {
+    nodeTypeName = unwrap(conn.fields.find((f) => f.name === "nodes").type)?.name;
+  } else if (hasEdges) {
+    const edgeType = unwrap(conn.fields.find((f) => f.name === "edges").type)?.name;
+    const edge = await typeFields(edgeType);
+    nodeTypeName = unwrap(edge.fields.find((f) => f.name === "node").type)?.name;
+  } else {
+    nodeTypeName = connName; // plain list
+  }
+  console.log(`Contact type: ${nodeTypeName}`);
+
+  // 3. Select every scalar/enum field the contact type has (referral fields included).
+  const nodeType = await typeFields(nodeTypeName);
+  let scalarFields = nodeType.fields
+    .filter((f) => !f.args?.length)
+    .filter((f) => ["SCALAR", "ENUM"].includes(unwrap(f.type)?.kind))
+    .map((f) => f.name);
+  const hasIdentifiers = nodeType.fields.some((f) => f.name === "identifiers");
+  console.log(`Fields found: ${scalarFields.join(", ")}${hasIdentifiers ? ", identifiers" : ""}`);
+
+  const acceptsFirst = target.args.some((a) => a.name === "first");
+  const acceptsAfter = target.args.some((a) => a.name === "after");
+
+  const buildQuery = () => {
+    const sel = [
+      "__typename",
+      ...scalarFields,
+      hasIdentifiers ? "identifiers { sourceId category }" : "",
+    ].filter(Boolean).join("\n            ");
+    const args = acceptsFirst ? `(first: 50${acceptsAfter ? ", after: $after" : ""})` : "";
+    const body = hasNodes
+      ? `nodes { ${sel} } ${hasPageInfo ? "pageInfo { hasNextPage endCursor }" : ""}`
+      : hasEdges
+        ? `edges { node { ${sel} } } ${hasPageInfo ? "pageInfo { hasNextPage endCursor }" : ""}`
+        : sel;
+    return `query${acceptsAfter ? "($after: String)" : ""} { ${target.name}${args} { ${body} } }`;
+  };
+
+  // 4. Paginate through everything, dropping any field the API refuses.
   let after = null;
   let fetched = 0;
   let kept = 0;
-  try {
-    while (true) {
-      const data = await gql(QUERY, { after });
-      const conn = data.conversations;
-      for (const node of conn.nodes || []) {
-        fetched++;
-        const created = toDate(node.createdAt);
-        if (created && created >= FROM && created <= TO) {
-          appendEvent(node, created);
-          kept++;
-        }
+  let retriesLeft = 5;
+  while (true) {
+    let data;
+    try {
+      data = await gql(buildQuery(), acceptsAfter ? { after } : {});
+    } catch (err) {
+      // Drop fields the server complains about and retry.
+      const bad = [...String(err.message).matchAll(/'([A-Za-z_][A-Za-z0-9_]*)'/g)].map((m) => m[1]);
+      const before = scalarFields.length;
+      scalarFields = scalarFields.filter((f) => !bad.includes(f));
+      if (scalarFields.length < before && retriesLeft-- > 0) {
+        console.log(`Retrying without field(s): ${bad.join(", ")}`);
+        continue;
       }
-      process.stdout.write(`\rFetched ${fetched} conversations, ${kept} in range...`);
-      if (!conn.pageInfo?.hasNextPage) break;
-      after = conn.pageInfo.endCursor;
+      throw err;
     }
-    console.log(`\nDone. ${kept} conversations from the selected period added to the dashboard data.`);
-    console.log("Open http://localhost:3000/dashboard to see them.");
-  } catch (err) {
-    console.error(`\nThe best-guess query was rejected by the API:\n${err.message}\n`);
-    console.log("Falling back to schema discovery...");
-    await saveSchemaSummary();
+    const root = data[target.name];
+    const nodes = hasNodes ? root.nodes : hasEdges ? root.edges.map((e) => e.node) : root;
+    for (const node of nodes || []) {
+      fetched++;
+      const created = toDate(node.createdAt || node.created_at);
+      if (!created || (created >= FROM && created <= TO)) {
+        appendEvent(node, created);
+        kept++;
+      }
+    }
+    process.stdout.write(`\rFetched ${fetched} contacts, ${kept} in range...`);
+    const pi = hasPageInfo ? root.pageInfo : null;
+    if (!pi?.hasNextPage || !acceptsAfter) break;
+    after = pi.endCursor;
   }
+  console.log(`\nDone. ${kept} contacts added to the dashboard data.`);
+  console.log("Start the bot and open http://localhost:3000/dashboard to see them.");
 }
 
 main().catch((err) => {
-  console.error("Failed:", err.message);
+  console.error("\nFailed:", err.message);
+  console.error("\nCopy this whole window's text and paste it in the Claude chat to adapt the script.");
   process.exit(1);
 });
