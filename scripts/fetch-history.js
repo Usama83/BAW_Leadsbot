@@ -138,7 +138,25 @@ function toDate(v) {
   return isNaN(d) ? null : d;
 }
 
+// Don't append the same contact twice across repeated syncs.
+const knownIds = new Set();
+if (fs.existsSync(PAYLOAD_LOG)) {
+  for (const line of fs.readFileSync(PAYLOAD_LOG, "utf8").split("\n")) {
+    if (!line) continue;
+    try {
+      const ev = JSON.parse(line);
+      const id = ev?.body?.data?.contact?.id;
+      if (id != null) knownIds.add(String(id));
+    } catch { /* ignore bad lines */ }
+  }
+}
+
 function appendEvent(contact, when) {
+  if (contact?.id != null) {
+    const key = String(contact.id);
+    if (knownIds.has(key)) return false;
+    knownIds.add(key);
+  }
   const event = {
     received_at: (when || new Date()).toISOString(),
     path: "/history-sync",
@@ -146,6 +164,7 @@ function appendEvent(contact, when) {
     body: { event: "history.sync", data: { contact } },
   };
   fs.appendFileSync(PAYLOAD_LOG, JSON.stringify(event) + "\n");
+  return true;
 }
 
 async function main() {
@@ -321,8 +340,7 @@ async function main() {
       const created = toDate(node.createdAt || node.created_at);
       if (created && (!oldestOnPage || created < oldestOnPage)) oldestOnPage = created;
       if (created && created >= FROM && created <= TO) {
-        appendEvent(node, created);
-        kept++;
+        if (appendEvent(node, created)) kept++;
       }
     }
     process.stdout.write(`\rChecked ${fetched} contacts, ${kept} in the last days...`);

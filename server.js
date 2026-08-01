@@ -8,6 +8,7 @@ import express from "express";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { spawn } from "child_process";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, "data");
@@ -83,7 +84,33 @@ app.get("/payloads", (_req, res) => {
   res.json(events);
 });
 
+// Automatic syncs: refresh the Meta ad catalog and pull recent Rasayel
+// contacts on startup and daily, using tokens from .env if present. Each
+// runs in a child process so a sync failure never takes the bot down.
+function envHasKey(key) {
+  const envFile = path.join(__dirname, ".env");
+  if (process.env[key]) return true;
+  if (!fs.existsSync(envFile)) return false;
+  return new RegExp(`^\\s*${key}\\s*=\\s*\\S`, "m").test(fs.readFileSync(envFile, "utf8"));
+}
+
+function runSync() {
+  if (envHasKey("META_ACCESS_TOKEN")) {
+    spawn(process.execPath, [path.join(__dirname, "scripts", "fetch-ad-names.js")], {
+      stdio: "inherit",
+    }).on("error", (e) => console.error("ad-names sync failed to start:", e.message));
+  }
+  if (envHasKey("RASAYEL_API_TOKEN")) {
+    spawn(process.execPath, [path.join(__dirname, "scripts", "fetch-history.js")], {
+      stdio: "inherit",
+      env: { ...process.env, HISTORY_DAYS: process.env.SYNC_DAYS || "3" },
+    }).on("error", (e) => console.error("history sync failed to start:", e.message));
+  }
+}
+
 app.listen(PORT, () => {
   console.log(`baw-leadsbot phase 0 listening on port ${PORT}`);
   console.log(`Webhook endpoint: POST /webhooks/rasayel`);
+  runSync();
+  setInterval(runSync, 24 * 60 * 60 * 1000);
 });
