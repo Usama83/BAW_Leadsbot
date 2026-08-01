@@ -138,15 +138,31 @@ function toDate(v) {
   return isNaN(d) ? null : d;
 }
 
-// Don't append the same contact twice across repeated syncs.
-const knownIds = new Set();
+// Referral data may arrive on a later, deeper sync than the contact's first
+// appearance — treat a contact as "known" only at its best data level, so a
+// re-sync that finally carries referral info replaces silence with attribution.
+function hasReferralData(node, depth = 0) {
+  if (!node || typeof node !== "object" || depth > 6) return false;
+  for (const [k, v] of Object.entries(node)) {
+    if (/referral/i.test(k) && v != null && typeof v !== "object" && v !== "") return true;
+    const label = node.field?.name || node.field?.label;
+    if (typeof label === "string" && /referral/i.test(label) && node.value != null) return true;
+    if (v && typeof v === "object" && hasReferralData(v, depth + 1)) return true;
+  }
+  return false;
+}
+
+const known = new Map(); // contact id -> already has referral data
 if (fs.existsSync(PAYLOAD_LOG)) {
   for (const line of fs.readFileSync(PAYLOAD_LOG, "utf8").split("\n")) {
     if (!line) continue;
     try {
       const ev = JSON.parse(line);
-      const id = ev?.body?.data?.contact?.id;
-      if (id != null) knownIds.add(String(id));
+      const c = ev?.body?.data?.contact;
+      if (c?.id != null) {
+        const key = String(c.id);
+        known.set(key, known.get(key) === true || hasReferralData(c));
+      }
     } catch { /* ignore bad lines */ }
   }
 }
@@ -154,8 +170,10 @@ if (fs.existsSync(PAYLOAD_LOG)) {
 function appendEvent(contact, when) {
   if (contact?.id != null) {
     const key = String(contact.id);
-    if (knownIds.has(key)) return false;
-    knownIds.add(key);
+    const prev = known.get(key);
+    const withRef = hasReferralData(contact);
+    if (prev !== undefined && (prev === true || !withRef)) return false;
+    known.set(key, withRef || prev === true);
   }
   const event = {
     received_at: (when || new Date()).toISOString(),
@@ -241,27 +259,92 @@ async function main() {
   const hasIdentifiers = nodeType.fields.some((f) => f.name === "identifiers");
   console.log(`Fields found: ${scalarFields.join(", ")}${hasIdentifiers ? ", identifiers" : ""}`);
 
-  const objectSelections = [];
-  const skipRe = /conversation|message|team|assignee|channel/i;
-  const nestedInfo = {};
-  for (const f of nodeType.fields) {
-    if (f.args?.length) continue;
-    const u = unwrap(f.type);
-    if (u?.kind !== "OBJECT" || f.name === "identifiers") continue;
-    let sub;
-    try { sub = await typeFields(u.name); } catch { continue; }
-    const scalars = (sub?.fields || [])
-      .filter((x) => !x.args?.length && ["SCALAR", "ENUM"].includes(unwrap(x.type)?.kind))
-      .map((x) => x.name);
-    nestedInfo[f.name] = scalars;
-    if (skipRe.test(f.name)) continue;
-    if (scalars.length && scalars.length <= 20) {
-      objectSelections.push({ name: f.name, sel: `${f.name} { ${scalars.join(" ")} }` });
+  const skipRe = /conversation|message|team|assignee|channel|avatar/i;
+  const typeCache = new Map();
+  async function typeFieldsCached(name) {
+    if (!typeCache.has(name)) typeCache.set(name, await typeFields(name));
+    return typeCache.get(name);
+  }
+
+  // Selection of all argless scalar fields of a type, descending one level
+  // into argless object subfields (e.g. value + field { name }).
+  async function selectionForType(typeName, depth) {
+    const t = await typeFieldsCached(typeName);
+    if (!t?.fields) return null;
+    const parts = [];
+    for (const x of t.fields) {
+      if (x.args?.length) continue;
+      const ux = unwrap(x.type);
+      if (["SCALAR", "ENUM"].includes(ux?.kind)) parts.push(x.name);
+      else if (ux?.kind === "OBJECT" && depth > 0 && !skipRe.test(x.name)) {
+        try {
+          const inner = await selectionForType(ux.name, depth - 1);
+          if (inner) parts.push(`${x.name} { ${inner} }`);
+        } catch { /* skip */ }
+      }
     }
+    return parts.length ? parts.join(" ") : null;
   }
-  if (objectSelections.length) {
-    console.log(`Including nested data: ${objectSelections.map((o) => o.name).join(", ")}`);
+
+  // Candidate deep selections: every non-scalar field on the contact type,
+  // including paginated sub-connections (custom/contact fields live there).
+  const nestedInfo = {};
+  const extraCandidates = [];
+  for (const f of nodeType.fields) {
+    if (f.name === "identifiers" || skipRe.test(f.name)) continue;
+    const u = unwrap(f.type);
+    if (!u || ["SCALAR", "ENUM"].includes(u.kind)) continue;
+    let sub;
+    try { sub = await typeFieldsCached(u.name); } catch { continue; }
+    if (!sub?.fields) continue;
+    try {
+      const nodesF = sub.fields.find((x) => x.name === "nodes");
+      const edgesF = sub.fields.find((x) => x.name === "edges");
+      if (nodesF || edgesF) {
+        let innerTypeName;
+        if (nodesF) {
+          innerTypeName = unwrap(nodesF.type)?.name;
+        } else {
+          const edgeT = await typeFieldsCached(unwrap(edgesF.type)?.name);
+          innerTypeName = unwrap(edgeT.fields.find((x) => x.name === "node").type)?.name;
+        }
+        const innerSel = await selectionForType(innerTypeName, 1);
+        nestedInfo[f.name] = `connection of ${innerTypeName}`;
+        if (!innerSel) continue;
+        const argList = (f.args || []).some((a) => a.name === "first") ? "(first: 25)" : "";
+        extraCandidates.push({
+          name: f.name,
+          sel: nodesF
+            ? `${f.name}${argList} { nodes { ${innerSel} } }`
+            : `${f.name}${argList} { edges { node { ${innerSel} } } }`,
+        });
+      } else {
+        if (f.args?.length) continue;
+        const innerSel = await selectionForType(u.name, 1);
+        nestedInfo[f.name] = `object ${u.name}`;
+        if (innerSel) extraCandidates.push({ name: f.name, sel: `${f.name} { ${innerSel} }` });
+      }
+    } catch { continue; }
   }
+
+  // Test each candidate against a single contact; keep the ones the API accepts.
+  const acceptedDeep = [];
+  for (const c of extraCandidates) {
+    const inner = `${target.name}(first: 1) { ${
+      hasNodes ? `nodes { ${c.sel} }` : hasEdges ? `edges { node { ${c.sel} } }` : c.sel
+    } }`;
+    const probeQuery = `query { ${parentField ? `${parentField.name} { ${inner} }` : inner} }`;
+    try {
+      await gql(probeQuery);
+      acceptedDeep.push(c);
+      if (acceptedDeep.length >= 8) break;
+    } catch { /* rejected by API — skip */ }
+  }
+  console.log(
+    acceptedDeep.length
+      ? `Deep data included: ${acceptedDeep.map((c) => c.name).join(", ")}`
+      : "No deep data structures accepted by the API."
+  );
   console.log(`Query arguments available: ${target.args.map((a) => a.name).join(", ") || "(none)"}`);
 
   // Save a schema map for diagnosis if referral data still doesn't show up.
@@ -284,7 +367,7 @@ async function main() {
     { name: "__typename", sel: "__typename" },
     ...scalarFields.map((n) => ({ name: n, sel: n })),
     ...(hasIdentifiers ? [{ name: "identifiers", sel: "identifiers { sourceId category }" }] : []),
-    ...objectSelections,
+    ...acceptedDeep,
   ];
 
   const argNames = new Set(target.args.map((a) => a.name));

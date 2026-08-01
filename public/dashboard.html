@@ -157,7 +157,9 @@ function findAdInfo(root) {
       }
     }
     // Custom-field style: { name: "Referral source ID", value: "1202..." }
-    const label = n.name || n.key || n.label || n.title;
+    // or { field: { name: "Referral source ID" }, value: "1202..." }
+    const label = n.name || n.key || n.label || n.title ||
+      (n.field && (n.field.name || n.field.key || n.field.label));
     const val = n.value ?? n.stringValue ?? n.val;
     if (typeof label === "string" && AD_KEY_RE.test(label) && val != null && typeof val !== "object" && val !== "") {
       hits[label] = val;
