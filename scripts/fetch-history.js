@@ -143,13 +143,38 @@ function toDate(v) {
 // re-sync that finally carries referral info replaces silence with attribution.
 function hasReferralData(node, depth = 0) {
   if (!node || typeof node !== "object" || depth > 6) return false;
+  const label = node.field?.name || node.field?.label || node.name;
+  if (typeof label === "string" && /referral/i.test(label) && node.value != null && node.value !== "") return true;
   for (const [k, v] of Object.entries(node)) {
     if (/referral/i.test(k) && v != null && typeof v !== "object" && v !== "") return true;
-    const label = node.field?.name || node.field?.label;
-    if (typeof label === "string" && /referral/i.test(label) && node.value != null) return true;
     if (v && typeof v === "object" && hasReferralData(v, depth + 1)) return true;
   }
   return false;
+}
+
+// Join custom-field VALUES (properties nodes, keyed by attrId) with their
+// LABELS (dataAttributes definitions) into simple {name, value} pairs the
+// dashboard reads directly.
+function attachContactFields(node) {
+  const defs = Array.isArray(node?.dataAttributes) ? node.dataAttributes : [];
+  const nameByAttr = new Map(
+    defs.filter((d) => d && d.attrId != null && d.name).map((d) => [String(d.attrId), d.name])
+  );
+  const out = [];
+  const scanArr = (arr) => {
+    for (const e of arr || []) {
+      if (!e || typeof e !== "object") continue;
+      const val = e.value ?? e.stringValue ?? e.textValue ?? e.boolValue ?? e.numberValue;
+      if (val == null || val === "") continue;
+      const label = (e.attrId != null && nameByAttr.get(String(e.attrId))) || e.name || e.key || null;
+      if (label) out.push({ name: label, value: val });
+    }
+  };
+  for (const v of Object.values(node || {})) {
+    if (Array.isArray(v)) scanArr(v);
+    else if (v && typeof v === "object" && Array.isArray(v.nodes)) scanArr(v.nodes);
+  }
+  if (out.length) node.contactFields = out;
 }
 
 const known = new Map(); // contact id -> already has referral data
@@ -337,8 +362,63 @@ async function main() {
     try {
       await gql(probeQuery);
       acceptedDeep.push(c);
-      if (acceptedDeep.length >= 8) break;
-    } catch { /* rejected by API — skip */ }
+      if (acceptedDeep.length >= 12) break;
+    } catch (err) {
+      nestedInfo[c.name] += ` | bulk probe rejected: ${String(err.message).slice(0, 120)}`;
+    }
+  }
+
+  // Refine pass: a connection whose bulk selection was rejected may still be
+  // partially readable — test its subfields one by one and keep the working
+  // set. This is how the properties connection (where custom-field VALUES
+  // live, joined to dataAttributes labels by attrId) gets recovered.
+  for (const c of extraCandidates) {
+    if (acceptedDeep.some((a) => a.name === c.name)) continue;
+    const f = nodeType.fields.find((x) => x.name === c.name);
+    const u = unwrap(f.type);
+    let sub;
+    try { sub = await typeFieldsCached(u.name); } catch { continue; }
+    const nodesF = sub?.fields?.find((x) => x.name === "nodes");
+    if (!nodesF) continue;
+    const innerTypeName = unwrap(nodesF.type)?.name;
+    let it;
+    try { it = await typeFieldsCached(innerTypeName); } catch { continue; }
+    const argList = (f.args || []).some((a) => a.name === "first") ? "(first: 25)" : "";
+    const tryProbe = async (sel) => {
+      const body = `${c.name}${argList} { nodes { ${sel} } }`;
+      const inner = `${target.name}(first: 1) { ${
+        hasNodes ? `nodes { ${body} }` : `edges { node { ${body} } }`
+      } }`;
+      await gql(`query { ${parentField ? `${parentField.name} { ${inner} }` : inner} }`);
+    };
+    try {
+      await tryProbe("__typename");
+    } catch (err) {
+      nestedInfo[c.name] += ` | base probe failed: ${String(err.message).slice(0, 120)}`;
+      continue;
+    }
+    const good = [];
+    for (const x of it?.fields || []) {
+      if (x.args?.length) continue;
+      const ux = unwrap(x.type);
+      let sel = null;
+      if (["SCALAR", "ENUM"].includes(ux?.kind)) sel = x.name;
+      else if (ux?.kind === "OBJECT" && !skipRe.test(x.name)) {
+        try {
+          const innerSel = await selectionForType(ux.name, 0);
+          if (innerSel) sel = `${x.name} { ${innerSel} }`;
+        } catch { /* skip */ }
+      }
+      if (!sel) continue;
+      try {
+        await tryProbe(sel);
+        good.push(sel);
+      } catch { nestedInfo[`${c.name}.${x.name}`] = "subfield rejected"; }
+    }
+    if (good.length) {
+      acceptedDeep.push({ name: c.name, sel: `${c.name}${argList} { nodes { ${good.join(" ")} } }` });
+      console.log(`Recovered deep field: ${c.name} (${good.length} subfields kept)`);
+    }
   }
   console.log(
     acceptedDeep.length
@@ -423,6 +503,7 @@ async function main() {
       const created = toDate(node.createdAt || node.created_at);
       if (created && (!oldestOnPage || created < oldestOnPage)) oldestOnPage = created;
       if (created && created >= FROM && created <= TO) {
+        attachContactFields(node);
         if (appendEvent(node, created)) kept++;
       }
     }
@@ -438,6 +519,22 @@ async function main() {
       cursor = pi.endCursor;
     }
   }
+  // Re-save the schema summary with probe outcomes for /diag.
+  fs.writeFileSync(
+    path.join(DATA_DIR, "rasayel-schema-summary.json"),
+    JSON.stringify(
+      {
+        query: `${parentField ? parentField.name + " > " : ""}${target.name}`,
+        args: target.args.map((a) => a.name),
+        contactType: nodeTypeName,
+        scalarFields,
+        deepIncluded: selParts.filter((p) => /\{/.test(p.sel)).map((p) => p.name),
+        nested: nestedInfo,
+      },
+      null,
+      2
+    )
+  );
   console.log(`\nDone. ${kept} contacts from the selected period added to the dashboard data.`);
   console.log("Start the bot and open http://localhost:3000/dashboard to see them.");
   if (kept > 0) {
