@@ -156,6 +156,12 @@ function findAdInfo(root) {
         }
       }
     }
+    // Custom-field style: { name: "Referral source ID", value: "1202..." }
+    const label = n.name || n.key || n.label || n.title;
+    const val = n.value ?? n.stringValue ?? n.val;
+    if (typeof label === "string" && AD_KEY_RE.test(label) && val != null && typeof val !== "object" && val !== "") {
+      hits[label] = val;
+    }
   }
   return Object.keys(hits).length ? hits : null;
 }
@@ -182,7 +188,7 @@ function adLabel(hits) {
     const k = Object.keys(hits).find(x => re.test(x));
     return k ? hits[k] : null;
   };
-  return pick(/headline|ad_?title/i) || pick(/source_?url|sourceUrl/i) || pick(/source_?id|sourceId/i) || Object.values(hits)[0];
+  return pick(/headline|ad[\s_]?title/i) || pick(/source[\s_]?url/i) || pick(/source[\s_]?id/i) || Object.values(hits)[0];
 }
 function fmt(ts) {
   if (!ts) return "–";

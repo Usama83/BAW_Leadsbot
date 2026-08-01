@@ -211,72 +211,138 @@ async function main() {
   }
   console.log(`Contact type: ${nodeTypeName}`);
 
-  // 3. Select every scalar/enum field the contact type has (referral fields included).
+  // 3. Select every scalar/enum field the contact type has, plus nested
+  //    objects with scalar subfields — Rasayel keeps referral data (ad id,
+  //    url, type) in nested structures, not as top-level contact columns.
   const nodeType = await typeFields(nodeTypeName);
-  let scalarFields = nodeType.fields
+  const scalarFields = nodeType.fields
     .filter((f) => !f.args?.length)
     .filter((f) => ["SCALAR", "ENUM"].includes(unwrap(f.type)?.kind))
     .map((f) => f.name);
   const hasIdentifiers = nodeType.fields.some((f) => f.name === "identifiers");
   console.log(`Fields found: ${scalarFields.join(", ")}${hasIdentifiers ? ", identifiers" : ""}`);
 
-  const acceptsFirst = target.args.some((a) => a.name === "first");
-  const acceptsAfter = target.args.some((a) => a.name === "after");
+  const objectSelections = [];
+  const skipRe = /conversation|message|team|assignee|channel/i;
+  const nestedInfo = {};
+  for (const f of nodeType.fields) {
+    if (f.args?.length) continue;
+    const u = unwrap(f.type);
+    if (u?.kind !== "OBJECT" || f.name === "identifiers") continue;
+    let sub;
+    try { sub = await typeFields(u.name); } catch { continue; }
+    const scalars = (sub?.fields || [])
+      .filter((x) => !x.args?.length && ["SCALAR", "ENUM"].includes(unwrap(x.type)?.kind))
+      .map((x) => x.name);
+    nestedInfo[f.name] = scalars;
+    if (skipRe.test(f.name)) continue;
+    if (scalars.length && scalars.length <= 20) {
+      objectSelections.push({ name: f.name, sel: `${f.name} { ${scalars.join(" ")} }` });
+    }
+  }
+  if (objectSelections.length) {
+    console.log(`Including nested data: ${objectSelections.map((o) => o.name).join(", ")}`);
+  }
+  console.log(`Query arguments available: ${target.args.map((a) => a.name).join(", ") || "(none)"}`);
+
+  // Save a schema map for diagnosis if referral data still doesn't show up.
+  fs.writeFileSync(
+    path.join(DATA_DIR, "rasayel-schema-summary.json"),
+    JSON.stringify(
+      {
+        query: `${parentField ? parentField.name + " > " : ""}${target.name}`,
+        args: target.args.map((a) => a.name),
+        contactType: nodeTypeName,
+        scalarFields,
+        nested: nestedInfo,
+      },
+      null,
+      2
+    )
+  );
+
+  let selParts = [
+    { name: "__typename", sel: "__typename" },
+    ...scalarFields.map((n) => ({ name: n, sel: n })),
+    ...(hasIdentifiers ? [{ name: "identifiers", sel: "identifiers { sourceId category }" }] : []),
+    ...objectSelections,
+  ];
+
+  const argNames = new Set(target.args.map((a) => a.name));
+  // Newest-first pagination (last/before) lets us stop as soon as we pass the
+  // start of the requested range instead of crawling the entire history.
+  const backwards = argNames.has("last") && argNames.has("before") && hasPageInfo;
+  const forwards = argNames.has("first");
+  console.log(backwards ? "Fetching newest-first." : "Fetching oldest-first (no backwards pagination available).");
 
   const buildQuery = () => {
-    const sel = [
-      "__typename",
-      ...scalarFields,
-      hasIdentifiers ? "identifiers { sourceId category }" : "",
-    ].filter(Boolean).join("\n            ");
-    const args = acceptsFirst ? `(first: 50${acceptsAfter ? ", after: $after" : ""})` : "";
+    const sel = selParts.map((p) => p.sel).join("\n            ");
+    const args = backwards
+      ? "(last: 50, before: $cursor)"
+      : forwards
+        ? `(first: 50${argNames.has("after") ? ", after: $cursor" : ""})`
+        : "";
+    const pageInfoSel = hasPageInfo ? "pageInfo { hasNextPage endCursor hasPreviousPage startCursor }" : "";
     const body = hasNodes
-      ? `nodes { ${sel} } ${hasPageInfo ? "pageInfo { hasNextPage endCursor }" : ""}`
+      ? `nodes { ${sel} } ${pageInfoSel}`
       : hasEdges
-        ? `edges { node { ${sel} } } ${hasPageInfo ? "pageInfo { hasNextPage endCursor }" : ""}`
+        ? `edges { node { ${sel} } } ${pageInfoSel}`
         : sel;
     const inner = `${target.name}${args} { ${body} }`;
     const wrapped = parentField ? `${parentField.name} { ${inner} }` : inner;
-    return `query${acceptsAfter ? "($after: String)" : ""} { ${wrapped} }`;
+    const varDecl = args.includes("$cursor") ? "($cursor: String)" : "";
+    return `query${varDecl} { ${wrapped} }`;
   };
 
-  // 4. Paginate through everything, dropping any field the API refuses.
-  let after = null;
+  // 4. Paginate, dropping any selection the API refuses.
+  let cursor = null;
   let fetched = 0;
   let kept = 0;
-  let retriesLeft = 5;
+  let retriesLeft = 8;
   while (true) {
     let data;
     try {
-      data = await gql(buildQuery(), acceptsAfter ? { after } : {});
+      data = await gql(buildQuery(), { cursor });
     } catch (err) {
-      // Drop fields the server complains about and retry.
       const bad = [...String(err.message).matchAll(/'([A-Za-z_][A-Za-z0-9_]*)'/g)].map((m) => m[1]);
-      const before = scalarFields.length;
-      scalarFields = scalarFields.filter((f) => !bad.includes(f));
-      if (scalarFields.length < before && retriesLeft-- > 0) {
-        console.log(`Retrying without field(s): ${bad.join(", ")}`);
+      const before = selParts.length;
+      selParts = selParts.filter((p) => !bad.includes(p.name));
+      if (selParts.length < before && retriesLeft-- > 0) {
+        console.log(`Retrying without: ${bad.join(", ")}`);
         continue;
       }
       throw err;
     }
     const root = parentField ? data[parentField.name][target.name] : data[target.name];
     const nodes = hasNodes ? root.nodes : hasEdges ? root.edges.map((e) => e.node) : root;
+    let oldestOnPage = null;
     for (const node of nodes || []) {
       fetched++;
       const created = toDate(node.createdAt || node.created_at);
-      if (!created || (created >= FROM && created <= TO)) {
+      if (created && (!oldestOnPage || created < oldestOnPage)) oldestOnPage = created;
+      if (created && created >= FROM && created <= TO) {
         appendEvent(node, created);
         kept++;
       }
     }
-    process.stdout.write(`\rFetched ${fetched} contacts, ${kept} in range...`);
+    process.stdout.write(`\rChecked ${fetched} contacts, ${kept} in the last days...`);
     const pi = hasPageInfo ? root.pageInfo : null;
-    if (!pi?.hasNextPage || !acceptsAfter) break;
-    after = pi.endCursor;
+    if (backwards) {
+      // Once a page dips below the start of the range, older pages can't match.
+      if (oldestOnPage && oldestOnPage < FROM) break;
+      if (!pi?.hasPreviousPage) break;
+      cursor = pi.startCursor;
+    } else {
+      if (!pi?.hasNextPage || !argNames.has("after")) break;
+      cursor = pi.endCursor;
+    }
   }
-  console.log(`\nDone. ${kept} contacts added to the dashboard data.`);
+  console.log(`\nDone. ${kept} contacts from the selected period added to the dashboard data.`);
   console.log("Start the bot and open http://localhost:3000/dashboard to see them.");
+  if (kept > 0) {
+    console.log("\nIf leads show as 'Direct' that should be ads, send the file");
+    console.log("data\\rasayel-schema-summary.json content to the Claude chat.");
+  }
 }
 
 main().catch((err) => {
