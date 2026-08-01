@@ -91,32 +91,11 @@ function findReferralValues(obj, out = [], depth = 0) {
 }
 
 async function main() {
-  console.log(`Referral check for phone ${PHONE}`);
+  console.log("Referral check — scanning newest contacts for ad leads");
   await connect();
   log(`Connected: ${ENDPOINT}`);
 
-  // 1. Find the contact by phone.
-  let contact = null;
-  for (const argName of ["nameOrPhone", "search", "query"]) {
-    try {
-      const d = await gql(
-        `query($v: String) { app { channelUsers(${argName}: $v, first: 5) {
-           nodes { id displayName identifiers { sourceId category } } } } }`,
-        { v: PHONE }
-      );
-      const nodes = d.app?.channelUsers?.nodes || [];
-      contact = nodes.find((n) => n.identifiers?.some((i) => (i.sourceId || "").includes(PHONE.slice(-8)))) || nodes[0];
-      if (contact) { log(`Found contact via ${argName}: ${contact.displayName} (id ${contact.id})`); break; }
-    } catch { /* try next arg */ }
-  }
-  if (!contact) {
-    log("Could not find the contact by phone — check the number and try again.");
-    report.verdict = "CONTACT NOT FOUND";
-    finish(1);
-    return;
-  }
-
-  // 2. Introspect the Properties node type and DataAttribute fully.
+  // 1. Introspect the Properties node type and DataAttribute fully.
   const cu = await typeInfo("ChannelUser");
   const propField = cu.fields.find((f) => f.name === "properties");
   let propNodeTypeName = null;
@@ -141,7 +120,8 @@ async function main() {
     log(`DataAttribute: ${report.dataAttributeType.join(" | ")}`);
   } catch { /* fine */ }
 
-  // 3. Probe every properties subfield individually on THIS contact.
+  // 2. Probe properties subfields against a page of newest contacts —
+  //    schema validation doesn't depend on which contact is in the page.
   const accepted = [];
   if (propNodeTypeName) {
     const pt = await typeInfo(propNodeTypeName);
@@ -160,57 +140,73 @@ async function main() {
       }
       if (!sel) continue;
       try {
-        await gql(
-          `query($id: ID!) { app { channelUsers(first: 1, query: $id) { nodes { properties(first: 5) { nodes { ${sel} } } } } } }`,
-          { id: String(contact.id) }
-        ).catch(async () => {
-          // query-arg may not accept ids — fall back to phone search
-          await gql(
-            `query($v: String) { app { channelUsers(nameOrPhone: $v, first: 1) { nodes { properties(first: 5) { nodes { ${sel} } } } } } }`,
-            { v: PHONE }
-          );
-        });
+        await gql(`query { app { channelUsers(last: 3) { nodes { properties(first: 5) { nodes { ${sel} } } } } } }`);
         accepted.push(sel);
       } catch { log(`properties subfield rejected: ${f.name}`); }
     }
     log(`Accepted properties subfields: ${accepted.join(", ") || "(none)"}`);
   }
 
-  // 4. Full pull for this contact: dataAttributes + properties with all accepted subfields.
-  let full = null;
-  try {
+  // 3. Scan newest-first for contacts whose dataAttributes carry referral
+  //    labels — those are the ad leads — and pull everything for them.
+  const adLeads = [];
+  let cursor = null;
+  let scanned = 0;
+  while (adLeads.length < 5 && scanned < 2000) {
     const d = await gql(
-      `query($v: String) { app { channelUsers(nameOrPhone: $v, first: 3) { nodes {
-         id displayName identifiers { sourceId category }
-         dataAttributes { attrId attrType name standard editable userId }
-         ${accepted.length ? `properties(first: 50) { nodes { ${accepted.join(" ")} } }` : ""}
-       } } } }`,
-      { v: PHONE }
+      `query($cursor: String) { app { channelUsers(last: 50, before: $cursor) {
+         pageInfo { hasPreviousPage startCursor }
+         nodes {
+           id displayName createdAt identifiers { sourceId category }
+           dataAttributes { attrId attrType name standard editable userId }
+           ${accepted.length ? `properties(first: 50) { nodes { ${accepted.join(" ")} } }` : ""}
+         } } } }`,
+      { cursor }
     );
-    const nodes = d.app?.channelUsers?.nodes || [];
-    full = nodes.find((n) => String(n.id) === String(contact.id)) || nodes[0];
-  } catch (err) {
-    log(`Full pull failed: ${String(err.message).slice(0, 200)}`);
+    const conn = d.app?.channelUsers;
+    const nodes = conn?.nodes || [];
+    scanned += nodes.length;
+    for (const n of nodes) {
+      if ((n.dataAttributes || []).some((a) => /referral/i.test(a?.name || ""))) {
+        adLeads.push(n);
+      }
+    }
+    process.stdout.write(`\rScanned ${scanned} contacts, ${adLeads.length} with referral labels...`);
+    if (!conn?.pageInfo?.hasPreviousPage || !nodes.length) break;
+    cursor = conn.pageInfo.startCursor;
   }
-  report.contact = full;
-  console.log("\n----- RAW CONTACT DATA -----");
-  console.log(JSON.stringify(full, null, 2));
-  console.log("----------------------------\n");
+  console.log("");
+  report.scanned = scanned;
+  report.adLeads = adLeads;
 
-  // 5. Verdict.
-  const values = findReferralValues(full);
+  if (!adLeads.length) {
+    report.verdict = "NO REFERRAL-LABELED CONTACTS IN SCAN";
+    log("======================================================");
+    log("VERDICT: no contacts with referral labels were found in");
+    log(`the newest ${scanned} contacts. Ad leads may be older.`);
+    log("======================================================");
+    finish(0);
+    return;
+  }
+
+  console.log("\n----- RAW DATA OF AD-LEAD CONTACTS -----");
+  console.log(JSON.stringify(adLeads, null, 2).slice(0, 6000));
+  console.log("----------------------------------------\n");
+
+  // 4. Verdict.
+  const values = adLeads.flatMap((c) => findReferralValues(c));
   report.referralValues = values;
   if (values.length) {
     report.verdict = "REFERRAL VALUES FOUND";
     log("==========================================");
     log("VERDICT: REFERRAL VALUES FOUND VIA THE API");
-    values.forEach((v) => log(`  ${v.label} = ${v.value}`));
+    values.slice(0, 10).forEach((v) => log(`  ${v.label} = ${v.value}`));
     log("==========================================");
   } else {
     report.verdict = "NOT EXPOSED BY API";
     log("=====================================================");
     log("VERDICT: THE API DOES NOT RETURN THE REFERRAL VALUES");
-    log("for a contact that visibly has them in the Rasayel UI.");
+    log(`(${adLeads.length} contact(s) carry referral labels but no values came back)`);
     log("=> Attribution must come from the live webhook instead.");
     log("=====================================================");
   }
