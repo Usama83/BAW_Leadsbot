@@ -88,6 +88,14 @@ app.get("/diag", (_req, res) => {
         : "<p>(no live webhook events stored)</p>")
   );
 
+  const checkPath = path.join(DATA_DIR, "referral-check.json");
+  sections.push(
+    "<h2>5. Referral check result</h2>" +
+      (fs.existsSync(checkPath)
+        ? `<pre>${esc(fs.readFileSync(checkPath, "utf8"))}</pre>`
+        : "<p>(not run yet — double-click check-referral.bat)</p>")
+  );
+
   res.type("html").send(
     `<!doctype html><meta charset="utf-8"><title>BAW Leadsbot diagnostics</title>
      <style>body{font-family:system-ui;margin:24px;max-width:1000px}pre{background:#f4f4f2;padding:12px;border-radius:8px;overflow-x:auto;font-size:12px}h2{margin-top:28px}</style>
