@@ -37,6 +37,16 @@ app.get("/dashboard", (_req, res) => {
   res.sendFile(path.join(__dirname, "public", "dashboard.html"));
 });
 
+// id -> {name, campaign, ...} map produced by scripts/fetch-ad-names.js
+app.get("/ad-names", (_req, res) => {
+  const p = path.join(DATA_DIR, "ad-names.json");
+  if (fs.existsSync(p)) {
+    res.type("json").send(fs.readFileSync(p, "utf8"));
+  } else {
+    res.json({});
+  }
+});
+
 // Some webhook providers probe with GET before accepting a URL.
 app.get("/webhooks/rasayel", (_req, res) => {
   res.status(200).send("OK");

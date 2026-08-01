@@ -188,7 +188,11 @@ function adLabel(hits) {
     const k = Object.keys(hits).find(x => re.test(x));
     return k ? hits[k] : null;
   };
-  return pick(/headline|ad[\s_]?title/i) || pick(/source[\s_]?url/i) || pick(/source[\s_]?id/i) || Object.values(hits)[0];
+  // A referral id that matches a known Meta ad gets its real name + campaign.
+  const id = pick(/source[\s_]?id|ad[\s_]?id/i);
+  const meta = id != null ? adNames[String(id)] : null;
+  if (meta) return meta.name + (meta.campaign ? " · " + meta.campaign : "");
+  return pick(/headline|ad[\s_]?title/i) || pick(/source[\s_]?url/i) || (id != null ? id : Object.values(hits)[0]);
 }
 function fmt(ts) {
   if (!ts) return "–";
@@ -199,10 +203,17 @@ function esc(s) {
   return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 }
 
+let adNames = {};
+
 async function refresh() {
   let events;
   try {
-    events = await (await fetch("/payloads")).json();
+    const [ev, names] = await Promise.all([
+      fetch("/payloads").then(r => r.json()),
+      fetch("/ad-names").then(r => r.json()).catch(() => ({})),
+    ]);
+    events = ev;
+    adNames = names || {};
   } catch {
     return;
   }
