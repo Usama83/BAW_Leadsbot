@@ -40,8 +40,15 @@ const URL_CANDIDATES = [
   ),
 ];
 const TOKEN = process.env.RASAYEL_API_TOKEN;
-const FROM = new Date(process.env.HISTORY_FROM || "2026-07-01T00:00:00Z");
-const TO = new Date(process.env.HISTORY_TO ? process.env.HISTORY_TO + "T23:59:59Z" : "2026-07-31T23:59:59Z");
+let FROM, TO;
+const days = parseInt(process.env.HISTORY_DAYS, 10);
+if (days > 0) {
+  TO = new Date();
+  FROM = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+} else {
+  FROM = new Date(process.env.HISTORY_FROM || "2026-07-01T00:00:00Z");
+  TO = new Date(process.env.HISTORY_TO ? process.env.HISTORY_TO + "T23:59:59Z" : "2026-07-31T23:59:59Z");
+}
 
 if (!TOKEN) {
   console.error("No RASAYEL_API_TOKEN found. Create a file named .env next to server.js");

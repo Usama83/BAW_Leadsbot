@@ -1,5 +1,5 @@
 @echo off
-title BAW Leadsbot - Fetch July history from Rasayel
+title BAW Leadsbot - Fetch history from Rasayel
 cd /d "%~dp0"
 
 if not exist .env (
@@ -10,6 +10,10 @@ if not exist .env (
     echo Saved to .env - this stays on your computer only.
     echo.
 )
+
+set /p DAYS=How many days back? (press Enter for 10):
+if "%DAYS%"=="" set DAYS=10
+set HISTORY_DAYS=%DAYS%
 
 node scripts\fetch-history.js
 echo.
