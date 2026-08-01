@@ -203,14 +203,138 @@ async function main() {
     values.slice(0, 10).forEach((v) => log(`  ${v.label} = ${v.value}`));
     log("==========================================");
   } else {
-    report.verdict = "NOT EXPOSED BY API";
+    report.verdict = "NOT EXPOSED ON CONTACTS";
     log("=====================================================");
-    log("VERDICT: THE API DOES NOT RETURN THE REFERRAL VALUES");
-    log(`(${adLeads.length} contact(s) carry referral labels but no values came back)`);
-    log("=> Attribution must come from the live webhook instead.");
+    log("VERDICT PART 1: contact records do NOT return referral");
+    log(`values (${adLeads.length} contact(s) have labels, no values).`);
+    log("Trying PART 2: message-level referral...");
     log("=====================================================");
+    await checkMessageReferral(adLeads);
   }
   finish(0);
+}
+
+// PART 2 — WhatsApp attaches ad referral to the customer's FIRST message;
+// Rasayel's message objects may expose it even though contact properties don't.
+async function checkMessageReferral(adLeads) {
+  // 1. What referral-ish fields do message types carry?
+  const msgTypeCandidates = ["TextMessage", "Message", "ImageMessage", "TemplateMessage"];
+  const refFieldsByType = {};
+  for (const tn of msgTypeCandidates) {
+    try {
+      const t = await typeInfo(tn);
+      if (!t?.fields) continue;
+      const hits = [];
+      for (const f of t.fields) {
+        // Referral fields AND the message content itself — the ad quote
+        // ("Source link: https://fb.me/...") often lives in the body/context.
+        if (!/referral|ctwa|ad(Id|_id)|sourceUrl|source_url|^body$|caption|context|quoted|preview|headline|forward/i.test(f.name)) continue;
+        const u = unwrap(f.type);
+        if (["SCALAR", "ENUM"].includes(u?.kind)) {
+          hits.push(f.name);
+        } else if (u?.kind === "OBJECT") {
+          try {
+            const it = await typeInfo(u.name);
+            const scalars = (it.fields || [])
+              .filter((x) => !(x.args || []).length && ["SCALAR", "ENUM"].includes(unwrap(x.type)?.kind))
+              .map((x) => x.name);
+            if (scalars.length) hits.push(`${f.name} { ${scalars.join(" ")} }`);
+          } catch { /* skip */ }
+        }
+      }
+      if (hits.length) refFieldsByType[tn] = hits;
+    } catch { /* type absent */ }
+  }
+  report.messageReferralFields = refFieldsByType;
+  log(`Message types with referral-ish fields: ${JSON.stringify(refFieldsByType) || "{}"}`);
+  if (!Object.keys(refFieldsByType).length) {
+    report.verdict = "NOT EXPOSED ANYWHERE — WEBHOOK REQUIRED";
+    log("==========================================================");
+    log("VERDICT PART 2: message types carry no referral fields either.");
+    log("=> Attribution must come from the live webhook for new leads.");
+    log("==========================================================");
+    return;
+  }
+
+  // 2. Find a conversation id for an ad lead.
+  let convId = null;
+  try {
+    const d = await gql(
+      `query { app { channelUsers(last: 100) { nodes {
+         dataAttributes { name }
+         sessions { nodes { conversationId } }
+       } } } }`
+    );
+    for (const n of d.app?.channelUsers?.nodes || []) {
+      if ((n.dataAttributes || []).some((a) => /referral/i.test(a?.name || ""))) {
+        convId = n.sessions?.nodes?.[0]?.conversationId || convId;
+      }
+    }
+  } catch (err) { log(`Session lookup failed: ${String(err.message).slice(0, 150)}`); }
+  if (!convId) {
+    log("Could not find a conversation id for an ad lead — cannot test message referral directly.");
+    report.verdict = "MESSAGE FIELDS EXIST — UNTESTED";
+    return;
+  }
+  log(`Testing conversation ${convId}...`);
+
+  // 3. Reach that conversation's messages.
+  const fragSel = Object.entries(refFieldsByType)
+    .map(([tn, hits]) => `... on ${tn} { ${hits.join(" ")} }`)
+    .join(" ");
+  const attempts = [
+    `query($id: ID!) { app { conversation(id: $id) { messages(first: 10) { nodes { __typename createdAt direction ${fragSel} } } } } }`,
+    `query($id: ID!) { app { conversations(ids: [$id], first: 1) { nodes { messages(first: 10) { nodes { __typename createdAt direction ${fragSel} } } } } } }`,
+    `query($id: ID!) { app { conversations(first: 1, id: $id) { nodes { messages(first: 10) { nodes { __typename createdAt direction ${fragSel} } } } } } }`,
+  ];
+  let messages = null;
+  for (const q of attempts) {
+    try {
+      const d = await gql(q, { id: String(convId) });
+      const conv = d.app?.conversation || d.app?.conversations?.nodes?.[0];
+      messages = conv?.messages?.nodes || null;
+      if (messages) break;
+    } catch (err) {
+      report.steps.push(`conversation query rejected: ${String(err.message).slice(0, 150)}`);
+    }
+  }
+  if (!messages) {
+    log("Could not query the conversation's messages (attempts logged in report).");
+    report.verdict = "MESSAGE FIELDS EXIST — CONVERSATION QUERY BLOCKED";
+    return;
+  }
+  console.log("\n----- MESSAGES OF AN AD-LEAD CONVERSATION -----");
+  console.log(JSON.stringify(messages, null, 2).slice(0, 4000));
+  console.log("-----------------------------------------------\n");
+  report.messages = messages;
+
+  const values = findReferralValues(messages);
+  report.referralValues = values;
+  const msgText = JSON.stringify(messages);
+  const adLink = msgText.match(/https?:\/\/fb\.me\/[A-Za-z0-9_-]+/);
+  const sourceLine = msgText.match(/Source link[^"]{0,120}/i);
+  if (values.length) {
+    report.verdict = "REFERRAL FOUND ON MESSAGES";
+    log("=================================================");
+    log("VERDICT PART 2: REFERRAL VALUES FOUND ON MESSAGES");
+    values.slice(0, 10).forEach((v) => log(`  ${v.label} = ${v.value}`));
+    log("=================================================");
+  } else if (adLink || sourceLine) {
+    report.verdict = "AD LINK FOUND IN MESSAGE TEXT";
+    report.adLink = adLink?.[0] || null;
+    log("====================================================");
+    log("VERDICT PART 2: AD LINK FOUND INSIDE THE MESSAGE TEXT");
+    if (adLink) log(`  ${adLink[0]}`);
+    if (sourceLine) log(`  ${sourceLine[0]}`);
+    log("=> Attribution possible by matching ad text/link to Meta.");
+    log("====================================================");
+  } else {
+    report.verdict = "NOT EXPOSED ANYWHERE — WEBHOOK REQUIRED";
+    log("==========================================================");
+    log("VERDICT PART 2: messages returned but carry no referral data.");
+    log("=> Attribution must come from the live webhook for new leads.");
+    log("==========================================================");
+  }
 }
 
 function finish(code) {
