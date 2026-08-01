@@ -256,51 +256,58 @@ async function checkMessageReferral(adLeads) {
     return;
   }
 
-  // 2. Find a conversation id for an ad lead.
-  let convId = null;
-  try {
-    const d = await gql(
-      `query { app { channelUsers(last: 100) { nodes {
-         dataAttributes { name }
-         sessions { nodes { conversationId } }
-       } } } }`
-    );
-    for (const n of d.app?.channelUsers?.nodes || []) {
-      if ((n.dataAttributes || []).some((a) => /referral/i.test(a?.name || ""))) {
-        convId = n.sessions?.nodes?.[0]?.conversationId || convId;
-      }
-    }
-  } catch (err) { log(`Session lookup failed: ${String(err.message).slice(0, 150)}`); }
-  if (!convId) {
-    log("Could not find a conversation id for an ad lead — cannot test message referral directly.");
-    report.verdict = "MESSAGE FIELDS EXIST — UNTESTED";
+  // 2. Discover — not guess — how conversations and messages are queried.
+  const appT = await typeInfo("App");
+  const convField =
+    (appT.fields || []).find((f) => f.name === "conversations") ||
+    (appT.fields || []).find((f) => /conversation/i.test(f.name));
+  if (!convField) {
+    log(`App has no conversations query. App fields: ${(appT.fields || []).map((f) => f.name).join(", ")}`);
+    report.verdict = "NO CONVERSATION QUERY — WEBHOOK REQUIRED";
     return;
   }
-  log(`Testing conversation ${convId}...`);
+  log(`Conversations query: ${convField.name}(${(convField.args || []).map((a) => a.name).join(", ")})`);
+  const connT = await typeInfo(unwrap(convField.type).name);
+  const nodesF = (connT.fields || []).find((x) => x.name === "nodes");
+  const convTypeName = nodesF ? unwrap(nodesF.type)?.name : unwrap(convField.type).name;
+  const convT = await typeInfo(convTypeName);
+  const msgsF =
+    (convT.fields || []).find((x) => x.name === "messages") ||
+    (convT.fields || []).find((x) => /messages/i.test(x.name));
+  if (!msgsF) {
+    log(`Conversation type has no messages field. Fields: ${(convT.fields || []).map((f) => f.name).join(", ")}`);
+    report.verdict = "NO MESSAGES FIELD — WEBHOOK REQUIRED";
+    return;
+  }
+  log(`Messages field: ${msgsF.name}(${(msgsF.args || []).map((a) => a.name).join(", ")})`);
 
-  // 3. Reach that conversation's messages.
+  // 3. Pull recent conversations with their first messages and scan them.
   const fragSel = Object.entries(refFieldsByType)
     .map(([tn, hits]) => `... on ${tn} { ${hits.join(" ")} }`)
     .join(" ");
-  const attempts = [
-    `query($id: ID!) { app { conversation(id: $id) { messages(first: 10) { nodes { __typename createdAt direction ${fragSel} } } } } }`,
-    `query($id: ID!) { app { conversations(ids: [$id], first: 1) { nodes { messages(first: 10) { nodes { __typename createdAt direction ${fragSel} } } } } } }`,
-    `query($id: ID!) { app { conversations(first: 1, id: $id) { nodes { messages(first: 10) { nodes { __typename createdAt direction ${fragSel} } } } } } }`,
-  ];
+  const msgArgs = new Set((msgsF.args || []).map((a) => a.name));
+  const convArgs = new Set((convField.args || []).map((a) => a.name));
+  const msgCall = (sel) =>
+    `${msgsF.name}${msgArgs.has("first") ? "(first: 10)" : ""} { nodes { ${sel} } }`;
+  const convCall = `${convField.name}${
+    convArgs.has("last") ? "(last: 30)" : convArgs.has("first") ? "(first: 30)" : ""
+  }`;
   let messages = null;
-  for (const q of attempts) {
+  for (const sel of [`__typename createdAt direction ${fragSel}`, `__typename ${fragSel}`, `__typename`]) {
+    const q = `query { app { ${convCall} { nodes { id ${msgCall(sel)} } } } }`;
     try {
-      const d = await gql(q, { id: String(convId) });
-      const conv = d.app?.conversation || d.app?.conversations?.nodes?.[0];
-      messages = conv?.messages?.nodes || null;
-      if (messages) break;
+      const d = await gql(q);
+      const convs = d.app?.[convField.name]?.nodes || [];
+      messages = convs.flatMap((c) => c?.[msgsF.name]?.nodes || []);
+      log(`Pulled ${convs.length} conversations, ${messages.length} messages.`);
+      break;
     } catch (err) {
-      report.steps.push(`conversation query rejected: ${String(err.message).slice(0, 150)}`);
+      report.steps.push(`conversations query rejected: ${String(err.message).slice(0, 200)}`);
     }
   }
-  if (!messages) {
-    log("Could not query the conversation's messages (attempts logged in report).");
-    report.verdict = "MESSAGE FIELDS EXIST — CONVERSATION QUERY BLOCKED";
+  if (!messages || !messages.length) {
+    log("Could not pull conversation messages (attempts logged in report — see /diag section 5).");
+    report.verdict = "MESSAGES QUERY BLOCKED — SEE REPORT";
     return;
   }
   console.log("\n----- MESSAGES OF AN AD-LEAD CONVERSATION -----");
