@@ -29,7 +29,16 @@ if (fs.existsSync(envPath)) {
   }
 }
 
-const API_URL = process.env.RASAYEL_API_URL || "https://api.rasayel.io/graphql";
+const URL_CANDIDATES = [
+  ...new Set(
+    [
+      process.env.RASAYEL_API_URL,
+      "https://api.rasayel.io/graphql",
+      "https://api.rasayel.io/api/graphql",
+      "https://app.rasayel.io/graphql",
+    ].filter(Boolean)
+  ),
+];
 const TOKEN = process.env.RASAYEL_API_TOKEN;
 const FROM = new Date(process.env.HISTORY_FROM || "2026-07-01T00:00:00Z");
 const TO = new Date(process.env.HISTORY_TO ? process.env.HISTORY_TO + "T23:59:59Z" : "2026-07-31T23:59:59Z");
@@ -40,10 +49,30 @@ if (!TOKEN) {
   process.exit(1);
 }
 
-async function gql(query, variables = {}) {
-  const res = await fetch(API_URL, {
+// Rasayel deployments vary in the auth scheme they accept; the token's own
+// jti claim is the key id used for HTTP Basic. Probe until one works.
+function authCandidates() {
+  const list = [{ label: "Bearer", header: `Bearer ${TOKEN}` }];
+  try {
+    const payload = JSON.parse(Buffer.from(TOKEN.split(".")[1], "base64url").toString());
+    if (payload.jti) {
+      list.push({
+        label: "Basic (token-id:token)",
+        header: "Basic " + Buffer.from(`${payload.jti}:${TOKEN}`).toString("base64"),
+      });
+    }
+  } catch { /* not a JWT — skip Basic */ }
+  list.push({ label: "raw token", header: TOKEN });
+  return list;
+}
+
+let ENDPOINT = null;
+let AUTH = null;
+
+async function rawGql(url, authHeader, query, variables = {}) {
+  const res = await fetch(url, {
     method: "POST",
-    headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
+    headers: { Authorization: authHeader, "Content-Type": "application/json" },
     body: JSON.stringify({ query, variables }),
   });
   const text = await res.text();
@@ -54,6 +83,28 @@ async function gql(query, variables = {}) {
   if (json.errors) throw new Error(JSON.stringify(json.errors));
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${text.slice(0, 300)}`);
   return json.data;
+}
+
+async function connect() {
+  const attempts = [];
+  for (const url of URL_CANDIDATES) {
+    for (const auth of authCandidates()) {
+      try {
+        await rawGql(url, auth.header, "{ __typename }");
+        ENDPOINT = url;
+        AUTH = auth.header;
+        console.log(`Connected to ${url} using ${auth.label} authentication.`);
+        return;
+      } catch (err) {
+        attempts.push(`  ${url} [${auth.label}]: ${String(err.message).slice(0, 120)}`);
+      }
+    }
+  }
+  throw new Error(`No endpoint/auth combination worked:\n${attempts.join("\n")}`);
+}
+
+async function gql(query, variables = {}) {
+  return rawGql(ENDPOINT, AUTH, query, variables);
 }
 
 function unwrap(t) {
@@ -93,8 +144,7 @@ function appendEvent(contact, when) {
 async function main() {
   console.log(`Fetching Rasayel contacts ${FROM.toISOString().slice(0, 10)} .. ${TO.toISOString().slice(0, 10)}`);
   console.log("Checking API access...");
-  await gql("{ __typename }");
-  console.log("API reachable, token accepted.");
+  await connect();
 
   // 1. Find the contacts query on the Query type.
   const q = await typeFields("Query");
