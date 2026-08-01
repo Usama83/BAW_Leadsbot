@@ -153,16 +153,45 @@ async function main() {
   console.log("Checking API access...");
   await connect();
 
-  // 1. Find the contacts query on the Query type.
+  // 1. Find the contacts query — either on the Query type directly, or nested
+  //    one level down (Rasayel exposes app/currentAppUser at the root, with
+  //    contacts living inside the app object).
+  const pickContactField = (fields) =>
+    fields.find((f) => /^(channelUsers|contacts|channel_users)$/i.test(f.name)) ||
+    fields.find((f) => /channelUser|contact/i.test(f.name));
+
   const q = await typeFields("Query");
-  const candidates = q.fields.filter((f) => /^(channelUsers|contacts|channel_users)$/i.test(f.name));
-  const target = candidates[0] || q.fields.find((f) => /channelUser|contact/i.test(f.name));
+  let parentField = null;
+  let target = pickContactField(q.fields);
   if (!target) {
-    console.error("Could not find a contacts query. Available queries:");
+    for (const f of q.fields) {
+      const tName = unwrap(f.type)?.name;
+      if (!tName) continue;
+      let sub;
+      try { sub = await typeFields(tName); } catch { continue; }
+      if (!sub?.fields) continue;
+      const cand = pickContactField(sub.fields);
+      if (cand) {
+        parentField = f;
+        target = cand;
+        break;
+      }
+      }
+  }
+  if (!target) {
+    console.error("Could not find a contacts query. Available root queries:");
     console.error(q.fields.map((f) => f.name).join(", "));
+    for (const f of q.fields) {
+      const tName = unwrap(f.type)?.name;
+      if (!tName) continue;
+      try {
+        const sub = await typeFields(tName);
+        if (sub?.fields) console.error(`  ${f.name} -> ${sub.fields.map((x) => x.name).join(", ")}`);
+      } catch { /* skip */ }
+    }
     process.exit(1);
   }
-  console.log(`Using query: ${target.name}`);
+  console.log(`Using query: ${parentField ? parentField.name + " > " : ""}${target.name}`);
 
   // 2. Inspect the returned connection type to find nodes/edges and the node type.
   const connName = unwrap(target.type)?.name;
@@ -206,7 +235,9 @@ async function main() {
       : hasEdges
         ? `edges { node { ${sel} } } ${hasPageInfo ? "pageInfo { hasNextPage endCursor }" : ""}`
         : sel;
-    return `query${acceptsAfter ? "($after: String)" : ""} { ${target.name}${args} { ${body} } }`;
+    const inner = `${target.name}${args} { ${body} }`;
+    const wrapped = parentField ? `${parentField.name} { ${inner} }` : inner;
+    return `query${acceptsAfter ? "($after: String)" : ""} { ${wrapped} }`;
   };
 
   // 4. Paginate through everything, dropping any field the API refuses.
@@ -229,7 +260,7 @@ async function main() {
       }
       throw err;
     }
-    const root = data[target.name];
+    const root = parentField ? data[parentField.name][target.name] : data[target.name];
     const nodes = hasNodes ? root.nodes : hasEdges ? root.edges.map((e) => e.node) : root;
     for (const node of nodes || []) {
       fetched++;
