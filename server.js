@@ -48,6 +48,53 @@ app.get("/ad-names", (_req, res) => {
   }
 });
 
+// Diagnostics: everything needed to debug attribution, in one screenshotable page.
+app.get("/diag", (_req, res) => {
+  const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  const sections = [];
+
+  const schemaPath = path.join(DATA_DIR, "rasayel-schema-summary.json");
+  sections.push(
+    "<h2>1. Rasayel schema summary</h2>" +
+      (fs.existsSync(schemaPath)
+        ? `<pre>${esc(fs.readFileSync(schemaPath, "utf8"))}</pre>`
+        : "<p>(file missing — run fetch-history.bat first)</p>")
+  );
+
+  let events = [];
+  if (fs.existsSync(PAYLOAD_LOG)) {
+    events = fs.readFileSync(PAYLOAD_LOG, "utf8").split("\n").filter(Boolean).map((l) => {
+      try { return JSON.parse(l); } catch { return null; }
+    }).filter(Boolean);
+  }
+  const referralCount = events.filter((e) => /referral/i.test(JSON.stringify(e.body || {}))).length;
+  sections.push(
+    `<h2>2. Stored events</h2><p>Total: ${events.length} — containing the word "referral" anywhere: <b>${referralCount}</b></p>`
+  );
+
+  const lastContactEv = [...events].reverse().find((e) => e.body?.data?.contact);
+  sections.push(
+    "<h2>3. Newest synced contact (raw)</h2>" +
+      (lastContactEv
+        ? `<pre>${esc(JSON.stringify(lastContactEv.body.data.contact, null, 2))}</pre>`
+        : "<p>(no history-sync contacts stored)</p>")
+  );
+
+  const lastWebhookEv = [...events].reverse().find((e) => e.path !== "/history-sync");
+  sections.push(
+    "<h2>4. Newest live webhook event (raw body)</h2>" +
+      (lastWebhookEv
+        ? `<pre>${esc(JSON.stringify(lastWebhookEv.body, null, 2)).slice(0, 8000)}</pre>`
+        : "<p>(no live webhook events stored)</p>")
+  );
+
+  res.type("html").send(
+    `<!doctype html><meta charset="utf-8"><title>BAW Leadsbot diagnostics</title>
+     <style>body{font-family:system-ui;margin:24px;max-width:1000px}pre{background:#f4f4f2;padding:12px;border-radius:8px;overflow-x:auto;font-size:12px}h2{margin-top:28px}</style>
+     <h1>Diagnostics</h1>${sections.join("")}`
+  );
+});
+
 // Some webhook providers probe with GET before accepting a URL.
 app.get("/webhooks/rasayel", (_req, res) => {
   res.status(200).send("OK");
