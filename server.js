@@ -48,6 +48,48 @@ app.get("/ad-names", (_req, res) => {
   }
 });
 
+// Readable view of the conversations study produced by study-conversations.bat.
+app.get("/study", (_req, res) => {
+  const esc = (s) => String(s ?? "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  const p = path.join(DATA_DIR, "conversations-study.json");
+  if (!fs.existsSync(p)) {
+    return res.type("html").send("<p style='font-family:system-ui;margin:24px'>No study yet — double-click <b>study-conversations.bat</b> first, then refresh.</p>");
+  }
+  const data = JSON.parse(fs.readFileSync(p, "utf8"));
+  const cards = (data.conversations || []).map((c) => `
+    <div class="card">
+      <div class="head">
+        <b>${esc(c.customer || "(unknown)")}</b> · ${esc(c.phone || "no phone")} ·
+        started ${c.createdAt ? new Date(c.createdAt).toLocaleString() : "?"} · ${esc(c.channelType || "")}
+      </div>
+      <div class="signals ${c.adSignals?.length ? "hit" : ""}">
+        Ad signals: ${c.adSignals?.length ? c.adSignals.map(esc).join("<br>") : "none"}
+      </div>
+      ${(c.messages || []).map((m) => `
+        <div class="msg ${m.direction === "INBOUND" ? "in" : "out"}">
+          <span class="meta">${esc(m.direction || "?")} · ${esc(m.type || "")}${m.at ? " · " + new Date(m.at).toLocaleString() : ""}</span>
+          <div>${esc(m.text) || "<i>(no text)</i>"}</div>
+          ${m.extras?.length ? `<div class="extras">${m.extras.map(esc).join("<br>")}</div>` : ""}
+        </div>`).join("")}
+    </div>`).join("");
+  res.type("html").send(
+    `<!doctype html><meta charset="utf-8"><title>Conversations study</title>
+     <style>
+       body{font-family:system-ui;margin:24px;max-width:900px;background:#f9f9f7}
+       .card{background:#fff;border:1px solid rgba(0,0,0,.1);border-radius:10px;padding:14px;margin-bottom:18px}
+       .head{margin-bottom:6px}
+       .signals{font-size:13px;color:#666;margin-bottom:10px}
+       .signals.hit{color:#006300;font-weight:600}
+       .msg{border-left:3px solid #ccc;padding:6px 10px;margin:6px 0;font-size:14px}
+       .msg.in{border-color:#2a78d6}
+       .meta{font-size:11px;color:#898781}
+       .extras{font-size:12px;color:#52514e;margin-top:4px}
+     </style>
+     <h1>Last ${data.conversations?.length ?? 0} conversations</h1>
+     <p>Generated ${data.generatedAt ? new Date(data.generatedAt).toLocaleString() : ""}</p>${cards}`
+  );
+});
+
 // Diagnostics: everything needed to debug attribution, in one screenshotable page.
 app.get("/diag", (_req, res) => {
   const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
