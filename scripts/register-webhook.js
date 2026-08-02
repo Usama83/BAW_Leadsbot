@@ -1,3 +1,5 @@
+import { applyProxy } from "./proxy-shim.js";
+await applyProxy();
 // Registers the webhook URL with Rasayel via its GraphQL API.
 //
 // Usage:

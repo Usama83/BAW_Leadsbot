@@ -1,3 +1,5 @@
+import { applyProxy } from "./proxy-shim.js";
+await applyProxy();
 // Pulls the newest conversations with their messages from the Rasayel API,
 // flags ad-related signals in message content, and saves a study report to
 // data/conversations-study.json (rendered at http://localhost:3000/study).
@@ -64,7 +66,7 @@ async function typeInfo(name) {
     `query($n: String!) { __type(name: $n) { name kind possibleTypes { name } fields {
        name
        args { name }
-       type { kind name ofType { kind name ofType { kind name } } }
+       type { kind name ofType { kind name ofType { kind name ofType { kind name ofType { kind name } } } } }
      } } }`, { n: name });
   typeCache.set(name, d.__type);
   return d.__type;
@@ -137,19 +139,30 @@ async function main() {
     } } } }`;
   };
 
+  // Probe each content fragment individually so one rejected field doesn't
+  // silence all message text.
+  const probeSel = async (sel) => {
+    await gql(`query { app { ${convField.name}(first: 1) { nodes { ${msgsF.name}(first: 1) { nodes { __typename ${sel} } } } } } }`);
+  };
+  const okFrags = [];
+  for (const fr of frags) {
+    try { await probeSel(fr); okFrags.push(fr); }
+    catch { console.log(`fragment rejected: ${fr.slice(0, 60)}...`); }
+  }
+  let baseSel = msgBase.join(" ");
+  try { await probeSel(baseSel); } catch {
+    const okBase = [];
+    for (const b of msgBase) { try { await probeSel(b); okBase.push(b); } catch { /* skip */ } }
+    baseSel = okBase.join(" ");
+  }
+  const msgSelFull = `__typename ${baseSel} ${okFrags.join(" ")}`;
+  console.log(`Message selection: base ${baseSel.split(" ").length} fields, ${okFrags.length}/${frags.length} fragments accepted.`);
+
   let data = null;
-  const msgSelFull = `__typename ${msgBase.join(" ")} ${frags.join(" ")}`;
-  const attempts = [
-    [true, msgSelFull],
-    [false, msgSelFull],
-    [true, `__typename ${msgBase.join(" ")}`],
-    [false, `__typename ${msgBase.join(" ")}`],
-    [false, "__typename"],
-  ];
   let lastErr = null;
-  for (const [withP, sel] of attempts) {
+  for (const withP of [true, false]) {
     try {
-      data = await gql(buildQuery(withP, sel));
+      data = await gql(buildQuery(withP, msgSelFull));
       console.log(`Query accepted (participants: ${withP}).`);
       break;
     } catch (err) { lastErr = err; }

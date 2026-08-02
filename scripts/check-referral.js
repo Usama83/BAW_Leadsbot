@@ -1,3 +1,5 @@
+import { applyProxy } from "./proxy-shim.js";
+await applyProxy();
 // Definitive referral check: targets one contact KNOWN to have ad referral
 // data in the Rasayel UI (visible in the contact sidebar), and tries every
 // reachable API path to extract those values. Prints a plain VERDICT.

@@ -1,3 +1,5 @@
+import { applyProxy } from "./proxy-shim.js";
+await applyProxy();
 // Downloads the id -> name map of all ads in the Meta ad accounts, so the
 // dashboard can show real ad names next to leads instead of numeric ids.
 //
@@ -48,7 +50,8 @@ async function main() {
     console.log(`Fetching ads from ${acct}...`);
     let url =
       `https://graph.facebook.com/${V}/${acct}/ads` +
-      `?fields=id,name,status,campaign{name},adset{name}&limit=200&access_token=${encodeURIComponent(TOKEN)}`;
+      `?fields=id,name,status,campaign{name},adset{name},creative{effective_object_story_id,instagram_permalink_url}` +
+      `&limit=200&access_token=${encodeURIComponent(TOKEN)}`;
     let count = 0;
     while (url) {
       const page = await graphGet(url);
@@ -59,6 +62,8 @@ async function main() {
           adset: ad.adset?.name || null,
           status: ad.status,
           account: acct,
+          storyId: ad.creative?.effective_object_story_id || null,
+          instagramUrl: ad.creative?.instagram_permalink_url || null,
         };
         count++;
       }

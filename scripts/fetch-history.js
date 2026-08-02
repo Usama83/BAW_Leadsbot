@@ -1,3 +1,5 @@
+import { applyProxy } from "./proxy-shim.js";
+await applyProxy();
 // Pulls contacts (channel users) from the Rasayel API — including their ad
 // referral fields — and merges them into the bot's data so the dashboard
 // shows historical leads, not only live webhooks.

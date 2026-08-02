@@ -126,7 +126,7 @@
 <footer>BAW Leadsbot · Phase 0 dashboard · data from <code>/payloads</code></footer>
 
 <script>
-const AD_KEY_RE = /referral|ctwa|ad_?id|adid|source_?url|headline|ad_?title|campaign/i;
+const AD_KEY_RE = /referral|ctwa|ad[\s_]?(id|name|post|text|source|title)|source[\s_]?url|headline|campaign/i;
 
 // Deep-search helpers — the payload shape is still being confirmed, so the
 // dashboard finds what it needs wherever it lives in the event tree.
@@ -190,11 +190,38 @@ function adLabel(hits) {
     const k = Object.keys(hits).find(x => re.test(x));
     return k ? hits[k] : null;
   };
-  // A referral id that matches a known Meta ad gets its real name + campaign.
+  const fmt = (m) => m.name + (m.campaign ? " · " + m.campaign : "");
+
+  // 1. Referral id that matches a known Meta ad directly.
   const id = pick(/source[\s_]?id|ad[\s_]?id/i);
-  const meta = id != null ? adNames[String(id)] : null;
-  if (meta) return meta.name + (meta.campaign ? " · " + meta.campaign : "");
-  return pick(/headline|ad[\s_]?title/i) || pick(/source[\s_]?url/i) || (id != null ? id : Object.values(hits)[0]);
+  if (id != null && adNames[String(id)]) return fmt(adNames[String(id)]);
+
+  // 2. Facebook post URL -> creative story id ("PAGE_POST").
+  const postUrl = pick(/ad[\s_]?post/i) || "";
+  const post = String(postUrl).match(/facebook\.com\/(\d+)\/posts\/(\d+)/);
+  if (post) {
+    const sid = `${post[1]}_${post[2]}`;
+    const m = Object.values(adNames).find(a => a.storyId === sid);
+    if (m) return fmt(m);
+  }
+
+  // 3. Instagram permalink match.
+  const srcUrl = pick(/ad[\s_]?source|source[\s_]?url/i) || "";
+  const insta = String(srcUrl).match(/instagram\.com\/p\/([A-Za-z0-9_-]+)/);
+  if (insta) {
+    const m = Object.values(adNames).find(a => a.instagramUrl && a.instagramUrl.includes(`/p/${insta[1]}`));
+    if (m) return fmt(m);
+  }
+
+  // 4. Ad name from the conversation fingerprint (match to catalog if possible).
+  const adName = pick(/ad[\s_]?name/i);
+  if (adName) {
+    const norm = String(adName).trim().toLowerCase();
+    const m = Object.values(adNames).find(a => a.name && a.name.trim().toLowerCase() === norm);
+    return m ? fmt(m) : adName;
+  }
+
+  return pick(/headline|ad[\s_]?title/i) || pick(/ad[\s_]?text/i) || srcUrl || (id != null ? id : Object.values(hits)[0]);
 }
 function fmt(ts) {
   if (!ts) return "–";
