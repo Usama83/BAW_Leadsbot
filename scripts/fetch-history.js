@@ -121,7 +121,7 @@ function unwrap(t) {
 
 async function typeFields(name) {
   const d = await gql(
-    `query($n: String!) { __type(name: $n) { name kind fields {
+    `query($n: String!) { __type(name: $n) { name kind possibleTypes { name } fields {
        name
        args { name }
        type { kind name ofType { kind name ofType { kind name ofType { kind name } } } }
@@ -161,10 +161,27 @@ function attachContactFields(node) {
     defs.filter((d) => d && d.attrId != null && d.name).map((d) => [String(d.attrId), d.name])
   );
   const out = [];
+  const META_KEYS = new Set([
+    "attrId", "id", "__typename", "name", "key", "label", "standard", "editable",
+    "channelSpecific", "userId", "attrType", "createdAt", "updatedAt", "uuid", "position", "kind",
+  ]);
   const scanArr = (arr) => {
     for (const e of arr || []) {
       if (!e || typeof e !== "object") continue;
-      const val = e.value ?? e.stringValue ?? e.textValue ?? e.boolValue ?? e.numberValue;
+      let val = e.value ?? e.stringValue ?? e.textValue ?? e.text ?? e.url ?? e.boolValue ?? e.numberValue;
+      if (val == null || val === "") {
+        // Typed value shapes (PropertiesTextType etc.) name their payload
+        // differently — take the first non-meta scalar.
+        for (const [k, v] of Object.entries(e)) {
+          if (!META_KEYS.has(k) && v != null && v !== "" && typeof v !== "object") { val = v; break; }
+          if (v && typeof v === "object" && !Array.isArray(v)) {
+            for (const [k2, v2] of Object.entries(v)) {
+              if (!META_KEYS.has(k2) && v2 != null && v2 !== "" && typeof v2 !== "object") { val = v2; break; }
+            }
+            if (val != null && val !== "") break;
+          }
+        }
+      }
       if (val == null || val === "") continue;
       const label = (e.attrId != null && nameByAttr.get(String(e.attrId))) || e.name || e.key || null;
       if (label) out.push({ name: label, value: val });
@@ -292,12 +309,14 @@ async function main() {
   }
 
   // Selection of all argless scalar fields of a type, descending one level
-  // into argless object subfields (e.g. value + field { name }).
+  // into argless object subfields (e.g. value + field { name }). Interface
+  // and union types (like Properties, whose value lives on concrete shapes
+  // such as PropertiesTextType) get inline fragments per possible type.
   async function selectionForType(typeName, depth) {
     const t = await typeFieldsCached(typeName);
-    if (!t?.fields) return null;
+    if (!t) return null;
     const parts = [];
-    for (const x of t.fields) {
+    for (const x of t.fields || []) {
       if (x.args?.length) continue;
       const ux = unwrap(x.type);
       if (["SCALAR", "ENUM"].includes(ux?.kind)) parts.push(x.name);
@@ -305,6 +324,18 @@ async function main() {
         try {
           const inner = await selectionForType(ux.name, depth - 1);
           if (inner) parts.push(`${x.name} { ${inner} }`);
+        } catch { /* skip */ }
+      }
+    }
+    if ((t.kind === "INTERFACE" || t.kind === "UNION") && t.possibleTypes?.length) {
+      for (const p of t.possibleTypes.slice(0, 15)) {
+        try {
+          const pt = await typeFieldsCached(p.name);
+          const extra = (pt?.fields || [])
+            .filter((x) => !x.args?.length && ["SCALAR", "ENUM"].includes(unwrap(x.type)?.kind))
+            .map((x) => x.name)
+            .filter((n) => !parts.includes(n));
+          if (extra.length) parts.push(`... on ${p.name} { ${extra.join(" ")} }`);
         } catch { /* skip */ }
       }
     }
@@ -408,12 +439,33 @@ async function main() {
           const innerSel = await selectionForType(ux.name, 0);
           if (innerSel) sel = `${x.name} { ${innerSel} }`;
         } catch { /* skip */ }
+      } else if (["INTERFACE", "UNION"].includes(ux?.kind)) {
+        try {
+          const innerSel = await selectionForType(ux.name, 0);
+          if (innerSel) sel = `${x.name} { __typename ${innerSel} }`;
+        } catch { /* skip */ }
       }
       if (!sel) continue;
       try {
         await tryProbe(sel);
         good.push(sel);
       } catch { nestedInfo[`${c.name}.${x.name}`] = "subfield rejected"; }
+    }
+    // Interface/union node types: test each concrete shape's fragment too.
+    if (["INTERFACE", "UNION"].includes(it?.kind) && it?.possibleTypes?.length) {
+      for (const p of it.possibleTypes.slice(0, 15)) {
+        try {
+          const pt = await typeFieldsCached(p.name);
+          const scalars = (pt?.fields || [])
+            .filter((x) => !x.args?.length && ["SCALAR", "ENUM"].includes(unwrap(x.type)?.kind))
+            .map((x) => x.name)
+            .filter((n) => !good.includes(n));
+          if (!scalars.length) continue;
+          const sel = `... on ${p.name} { ${scalars.join(" ")} }`;
+          await tryProbe(sel);
+          good.push(sel);
+        } catch { nestedInfo[`${c.name}...${p.name}`] = "fragment rejected"; }
+      }
     }
     if (good.length) {
       acceptedDeep.push({ name: c.name, sel: `${c.name}${argList} { nodes { ${good.join(" ")} } }` });
