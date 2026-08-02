@@ -206,10 +206,18 @@ function adLabel(hits) {
   }
 
   // 3. Instagram permalink match.
-  const srcUrl = pick(/ad[\s_]?source|source[\s_]?url/i) || "";
+  const rawSrc = pick(/ad[\s_]?source|source[\s_]?url/i) || "";
+  const srcUrl = fbmeMap[rawSrc] || rawSrc;
   const insta = String(srcUrl).match(/instagram\.com\/p\/([A-Za-z0-9_-]+)/);
   if (insta) {
     const m = Object.values(adNames).find(a => a.instagramUrl && a.instagramUrl.includes(`/p/${insta[1]}`));
+    if (m) return fmt(m);
+  }
+
+  // 3b. Resolved Facebook URL -> match any story id by its post-id part.
+  const numIds = [...String(srcUrl).matchAll(/(?:story_fbid=|\/(?:videos|posts|reels)\/)(\d+)/g)].map(x => x[1]);
+  if (numIds.length) {
+    const m = Object.values(adNames).find(a => a.storyId && numIds.some(i => a.storyId.endsWith("_" + i)));
     if (m) return fmt(m);
   }
 
@@ -233,16 +241,19 @@ function esc(s) {
 }
 
 let adNames = {};
+let fbmeMap = {};
 
 async function refresh() {
   let events;
   try {
-    const [ev, names] = await Promise.all([
+    const [ev, names, fbme] = await Promise.all([
       fetch("/payloads").then(r => r.json()),
       fetch("/ad-names").then(r => r.json()).catch(() => ({})),
+      fetch("/fbme-map").then(r => r.json()).catch(() => ({})),
     ]);
     events = ev;
     adNames = names || {};
+    fbmeMap = fbme || {};
   } catch {
     return;
   }

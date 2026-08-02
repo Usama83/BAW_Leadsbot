@@ -48,6 +48,12 @@ app.get("/ad-names", (_req, res) => {
   }
 });
 
+// fb.me short link -> real Facebook URL map (scripts/resolve-fbme.js).
+app.get("/fbme-map", (_req, res) => {
+  const p = path.join(DATA_DIR, "fbme-map.json");
+  res.type("json").send(fs.existsSync(p) ? fs.readFileSync(p, "utf8") : "{}");
+});
+
 // Readable view of the conversations study produced by study-conversations.bat.
 app.get("/study", (_req, res) => {
   const esc = (s) => String(s ?? "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
