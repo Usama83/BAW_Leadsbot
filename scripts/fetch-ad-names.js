@@ -50,8 +50,8 @@ async function main() {
     console.log(`Fetching ads from ${acct}...`);
     let url =
       `https://graph.facebook.com/${V}/${acct}/ads` +
-      `?fields=id,name,status,campaign{name},adset{name},creative{effective_object_story_id,instagram_permalink_url}` +
-      `&limit=200&access_token=${encodeURIComponent(TOKEN)}`;
+      `?fields=id,name,status,campaign{name},adset{name},creative.thumbnail_width(320).thumbnail_height(320){effective_object_story_id,instagram_permalink_url,thumbnail_url,image_url,body}` +
+      `&limit=50&access_token=${encodeURIComponent(TOKEN)}`;
     let count = 0;
     while (url) {
       const page = await graphGet(url);
@@ -64,6 +64,9 @@ async function main() {
           account: acct,
           storyId: ad.creative?.effective_object_story_id || null,
           instagramUrl: ad.creative?.instagram_permalink_url || null,
+          thumbnailUrl: ad.creative?.thumbnail_url || null,
+          imageUrl: ad.creative?.image_url || null,
+          body: ad.creative?.body ? String(ad.creative.body).slice(0, 500) : null,
         };
         count++;
       }
