@@ -155,8 +155,22 @@ Then register `https://<host>/webhooks/rasayel` in Rasayel → live capture, no 
 
 ## 9. Backlog / next steps
 
-1. VPS deployment (section 6) — makes everything permanent and self-updating
-2. Live webhook attribution end-to-end test (one real ad-click while deployed)
-3. Response-time, geography (phone country code), creative-fatigue analyses
-4. FX-normalize revenue; Telegram daily digest (bot token exists)
-5. Regenerate Meta token before late Aug 2026
+1. VPS deployment (section 6, or run `deploy.sh` — one command) — makes
+   everything permanent and self-updating
+2. **Main-system UI requirement (owner request):** merge the existing
+   **Marketing** and **WhatsApp** tabs into a single **Marketing** tab that
+   contains all sections from both, PLUS the new sections produced by this
+   system: leads-per-ad with creative previews and links, sales orders per ad
+   (Odoo join), leads-per-month by category, arrival heatmap, cost-per-lead,
+   and the zero-lead spend audit — all behind the shared filter bar (period
+   presets + custom month range, category, market KSA/Global, ad-name search).
+   A complete reference implementation of every new section and the filter
+   logic is the master report (`scratchpad` build; embedded-data variant of
+   `public/dashboard.html` + `/ad-sos` + `/ad-names` + `/payloads` feeds).
+   The main system's tab code was not accessible from this project — the
+   integrating developer should reuse those endpoints/sections inside the
+   main system's own tab framework.
+3. Live webhook attribution end-to-end test (one real ad-click while deployed)
+4. Response-time, geography (phone country code), creative-fatigue analyses
+5. FX-normalize revenue; Telegram daily digest (bot token exists)
+6. Regenerate Meta token before late Aug 2026
