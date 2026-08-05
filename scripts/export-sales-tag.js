@@ -103,6 +103,14 @@ for (let i = 0; i < pids.length; i += 500) {
 }
 console.log(`${pids.length} customers fetched.`);
 
+// ---- currency unit labels ("Dirham", "Riyal"), as the list view shows them ----
+const curIds = [...new Set(orders.map((o) => o.currency_id?.[0]).filter(Boolean))];
+const curLabel = {};
+if (curIds.length) {
+  for (const c of await exec("res.currency", "read", [curIds], { fields: ["name", "currency_unit_label"] }))
+    curLabel[c.id] = c.currency_unit_label || c.name;
+}
+
 // ---- tag names ----
 const allTagIds = [...new Set(orders.flatMap((o) => o.tag_ids || []))];
 const tagName = {};
@@ -124,8 +132,9 @@ const rows = orders.map((o) => {
   const p = partners[o.partner_id?.[0]] || {};
   const ship = partners[o.partner_shipping_id?.[0]] || {};
   const city = (CITY_FIELD && (Array.isArray(o[CITY_FIELD]) ? o[CITY_FIELD][1] : o[CITY_FIELD])) || p.city || ship.city || "";
-  // Odoo stores a leading "+" as text; keep it, but strip stray whitespace.
-  const phone = [p.phone, p.mobile].map((x) => (x || "").trim()).filter(Boolean).join(" / ");
+  // phone and mobile are often the same number — list each distinct one once.
+  const phone = [...new Set([p.phone, p.mobile, ship.phone, ship.mobile]
+    .map((x) => (x || "").trim()).filter(Boolean))].join(" / ");
   return [
     city,
     localDT(o.create_date),
@@ -137,7 +146,7 @@ const rows = orders.map((o) => {
     (o.tag_ids || []).map((id) => tagName[id] || id).join(" - "),
     Number(o.amount_total || 0).toFixed(2),
     o.warehouse_id?.[1] || "",
-    o.currency_id?.[1] || "",
+    curLabel[o.currency_id?.[0]] || o.currency_id?.[1] || "",
     phone,
   ];
 });
